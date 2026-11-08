@@ -7,11 +7,9 @@ import {
   departments,
   mailHref,
   meetings,
-  messaging,
-  smsHref,
+  phones,
   socials,
   telHref,
-  whatsappHref,
 } from "@/lib/contact";
 
 export default function Footer() {
@@ -40,18 +38,18 @@ export default function Footer() {
         </div>
 
         <div className="site-footer__contacts" aria-label="Direct lines">
+          {phones.map((p) => (
+            <div key={p.id} className="footer-contact">
+              <p className="footer-contact__label">{p.label}</p>
+              <a href={telHref(p.tel)}>{p.display}</a>
+            </div>
+          ))}
           {departments.map((d) => (
             <div key={d.id} className="footer-contact">
               <p className="footer-contact__label">{d.label}</p>
-              <a href={telHref(d.phone)}>{d.phone}</a>
               <a href={mailHref(d.email)}>{d.email}</a>
             </div>
           ))}
-          <div className="footer-contact">
-            <p className="footer-contact__label">{messaging.label}</p>
-            <a href={whatsappHref}>WhatsApp {messaging.display}</a>
-            <a href={smsHref}>SMS {messaging.display}</a>
-          </div>
         </div>
 
         <div className="site-footer__bottom">

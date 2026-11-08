@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { Topography, Watermark } from "./Art";
 import PointerFx from "./PointerFx";
-import { bookCallHref, dept, departments, mailHref, telHref } from "@/lib/contact";
+import { bookCallHref, dept, mailHref, phones, telHref } from "@/lib/contact";
 
 export function PageIntro({
   eyebrow,
@@ -53,8 +53,6 @@ export function ContactLine({ departmentId, topic }: { departmentId: string; top
   return (
     <p className="contact-line">
       <span className="contact-line__label">Talk to {d.label}</span>
-      <a href={telHref(d.phone)}>{d.phone}</a>
-      <span aria-hidden="true">·</span>
       <a href={mailHref(d.email, topic)}>{d.email}</a>
     </p>
   );
@@ -62,7 +60,6 @@ export function ContactLine({ departmentId, topic }: { departmentId: string; top
 
 export function ContactBand({ title = "Tell us where you want to be in ninety days." }: { title?: string }) {
   const general = dept("general");
-  const quick = departments.filter((d) => d.id !== "general");
   return (
     <section className="contact-band" aria-labelledby="band-title">
       <div className="contact-band__decor" aria-hidden="true">
@@ -90,20 +87,14 @@ export function ContactBand({ title = "Tell us where you want to be in ninety da
             </div>
           </div>
           <div className="contact-band__lines" data-reveal>
-            <a className="contact-band__big" href={telHref(general.phone)}>
-              {general.phone}
-            </a>
+            {phones.map((p) => (
+              <a className="contact-band__big" href={telHref(p.tel)} key={p.id}>
+                {p.label} {p.display}
+              </a>
+            ))}
             <a className="contact-band__big contact-band__big--mail" href={mailHref(general.email)}>
               {general.email}
             </a>
-            <ul className="contact-band__list">
-              {quick.map((d) => (
-                <li key={d.id}>
-                  <span>{d.label}</span>
-                  <a href={telHref(d.phone)}>{d.phone}</a>
-                </li>
-              ))}
-            </ul>
           </div>
         </div>
       </div>

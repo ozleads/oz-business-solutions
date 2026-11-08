@@ -5,16 +5,7 @@ import { usePathname } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Monogram, Wordmark } from "./Brand";
 import { nav } from "@/lib/nav";
-import {
-  bookCallHref,
-  contactNote,
-  dept,
-  mailHref,
-  messaging,
-  smsHref,
-  telHref,
-  whatsappHref,
-} from "@/lib/contact";
+import { bookCallHref, contactNote, dept, mailHref, phones, telHref } from "@/lib/contact";
 import { getLenis } from "./SmoothScroll";
 
 export default function Header() {
@@ -143,16 +134,14 @@ export default function Header() {
           </nav>
           <aside className="menu__aside" aria-label="Contact details">
             <p className="eyebrow">Talk to us</p>
-            <a className="menu__big" href={telHref(general.phone)}>
-              {general.phone}
-            </a>
+            {phones.map((p) => (
+              <a className="menu__big" href={telHref(p.tel)} key={p.id}>
+                {p.label} {p.display}
+              </a>
+            ))}
             <a className="menu__big" href={mailHref(general.email)}>
               {general.email}
             </a>
-            <p className="menu__msg">
-              {messaging.label}: <a href={whatsappHref}>WhatsApp</a> · <a href={smsHref}>SMS</a>{" "}
-              {messaging.display}
-            </p>
             <a href={bookCallHref} className="btn" onClick={close}>
               Book a call
             </a>

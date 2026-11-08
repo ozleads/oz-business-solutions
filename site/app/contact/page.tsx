@@ -9,17 +9,15 @@ import {
   departments,
   mailHref,
   meetings,
-  messaging,
-  smsHref,
+  phones,
   socials,
   telHref,
-  whatsappHref,
 } from "@/lib/contact";
 
 export const metadata: Metadata = {
   title: "Contact",
   description:
-    "Call, email, message or book a call with OZ Business Solutions. Direct lines for sales, client success, support, marketing and operations.",
+    "Call the United States or Canada line, email a department, or book a call with OZ Business Solutions.",
 };
 
 export default function ContactPage() {
@@ -32,7 +30,7 @@ export default function ContactPage() {
             Let’s talk about your <em>next</em> ninety days.
           </>
         }
-        lede="Call the line that fits, write to a department, message us, or use the form. Every enquiry is read by a person."
+        lede="Call the United States or Canada line, write to a department, or use the form. Every enquiry is read by a person."
         art={<span className="intro-crosses" />}
       />
 
@@ -47,35 +45,26 @@ export default function ContactPage() {
             </a>
           </div>
           <ul className="dept-cards">
+            {phones.map((p) => (
+              <li key={p.id} className="dept-card" data-reveal>
+                <h3 className="dept-card__label">{p.label}</h3>
+                <a className="dept-card__phone" href={telHref(p.tel)}>
+                  <span className="sr-only">Call {p.label}: </span>
+                  {p.display}
+                </a>
+              </li>
+            ))}
             {departments.map((d) => (
               <li key={d.id} className="dept-card" data-reveal>
                 <DeptIcon name={d.id} size={44} className="dept-card__icon" />
                 <h3 className="dept-card__label">{d.label}</h3>
                 <p className="dept-card__purpose">{d.purpose}</p>
-                <a className="dept-card__phone" href={telHref(d.phone)}>
-                  <span className="sr-only">Call {d.label}: </span>
-                  {d.phone}
-                </a>
                 <a className="dept-card__mail" href={mailHref(d.email)}>
                   <span className="sr-only">Email {d.label}: </span>
                   {d.email}
                 </a>
               </li>
             ))}
-            <li className="dept-card dept-card--msg" data-reveal>
-              <DeptIcon name="messaging" size={44} className="dept-card__icon" />
-              <h3 className="dept-card__label">{messaging.label}</h3>
-              <p className="dept-card__purpose">Quick questions and scheduling, by text.</p>
-              <p className="dept-card__phone">{messaging.display}</p>
-              <p className="dept-card__actions">
-                <a href={whatsappHref} className="btn btn--small btn--ghost">
-                  WhatsApp
-                </a>
-                <a href={smsHref} className="btn btn--small btn--ghost">
-                  SMS
-                </a>
-              </p>
-            </li>
           </ul>
         </div>
       </section>

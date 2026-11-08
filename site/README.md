@@ -24,25 +24,21 @@ npm run typecheck
 | `/packages` | Launch / Grow / Scale starting-point ranges and a comparison table |
 | `/approach` | Audit, Plan, Build, Run |
 | `/company` | Four partners (by title), four departments, specialist network |
-| `/contact` | Department cards (click-to-call and email), WhatsApp/SMS, contact form |
+| `/contact` | United States and Canada lines, department email cards, contact form |
 
-## Replacing the placeholder contacts
+## Contacts
 
-All phone numbers, inboxes, WhatsApp/SMS and social links live in **one file: `lib/contact.ts`**.
+Phone numbers, inboxes and social links live in **one file: `lib/contact.ts`**.
 Edit the values there and every page (header menu, footer, contact page, service contact lines, contact band)
 updates on the next build.
 
-- `departments`: label, one-line purpose, `phone` (display format, e.g. `(555) 014-2000`) and `email`.
-  `tel:` links are generated from the phone digits by `telHref()`; 10-digit numbers are treated as +1.
-  For non-North-American numbers, write the phone with its country code (e.g. `+44 20 7946 0000`).
-- `messaging`: the WhatsApp/SMS number, both as displayed and in E.164 (`+15550142006`).
+- `phones`: the two live lines, United States and Canada. Each has a display string and a `tel` value
+  (`+12053089904`, `+16477137349`). `telHref()` turns that into the `tel:` link.
+- `departments`: label, one-line purpose and `email`. Department cards and contact lines show the email only.
 - `socials`: LinkedIn, Instagram, X URLs.
 - `bookCallHref`: currently a pre-addressed email to Sales. Swap it for a scheduling link (Calendly, Cal.com,
   Google appointment page) when you have one.
-- `contactNote`: the small “placeholders” notice. Delete its usages in `components/Footer.tsx`,
-  `components/Header.tsx` and `app/contact/page.tsx` (or set it to an empty string) once the real details are in.
-
-The 555-014-xxxx numbers are reserved fictional numbers; they do not ring anyone.
+- `contactNote`: phone numbers are the live lines; email addresses are still placeholders.
 
 ### Connecting the contact form
 
