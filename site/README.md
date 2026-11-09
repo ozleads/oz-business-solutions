@@ -28,14 +28,13 @@ npm run typecheck
 
 ## Contacts
 
-Phone numbers, inboxes and social links live in **one file: `lib/contact.ts`**.
+Phone numbers and inboxes live in **one file: `lib/contact.ts`**.
 Edit the values there and every page (header menu, footer, contact page, service contact lines, contact band)
 updates on the next build.
 
 - `phones`: the two live lines, United States and Canada. Each has a display string and a `tel` value
   (`+12053089904`, `+16477137349`). `telHref()` turns that into the `tel:` link.
 - `departments`: label, one-line purpose and `email`. Department cards and contact lines show the email only.
-- `socials`: LinkedIn, Instagram, X URLs.
 - `bookCallHref`: currently a pre-addressed email to Sales. Swap it for a scheduling link (Calendly, Cal.com,
   Google appointment page) when you have one.
 - `email`: the live inbox, `hq@ozgrowthco.com`. Every department card, contact line, and the book-a-call link uses it.

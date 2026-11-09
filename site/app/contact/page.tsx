@@ -10,7 +10,6 @@ import {
   mailHref,
   meetings,
   phones,
-  socials,
   telHref,
 } from "@/lib/contact";
 
@@ -80,15 +79,6 @@ export default function ContactPage() {
             </h2>
             <div className="contact-aside" data-reveal>
               <p>{meetings}</p>
-              <ul className="socials socials--stack" aria-label="Social">
-                {socials.map((s) => (
-                  <li key={s.href}>
-                    <a href={s.href} target="_blank" rel="noopener noreferrer">
-                      {s.label}
-                    </a>
-                  </li>
-                ))}
-              </ul>
               <p className="fineprint">{contactNote}</p>
             </div>
             <PointerFx mode="spotlight" className="contact-panel" aria-hidden="true">

@@ -1,5 +1,5 @@
 /**
- * Single source of truth for every phone number, inbox and social link on the site.
+ * Single source of truth for every phone number and inbox on the site.
  * Phone numbers are the live lines. The inbox is hq@ozgrowthco.com.
  */
 
@@ -65,12 +65,6 @@ export const departments: Department[] = [
     purpose: "SOPs, automation, software setup and dashboards.",
     email,
   },
-];
-
-export const socials = [
-  { label: "LinkedIn", href: "https://www.linkedin.com/company/oz-business-solutions" },
-  { label: "Instagram", href: "https://www.instagram.com/ozbusinesssolutions" },
-  { label: "X", href: "https://x.com/ozbizsolutions" },
 ];
 
 export function dept(id: string): Department {

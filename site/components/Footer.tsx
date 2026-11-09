@@ -8,7 +8,6 @@ import {
   mailHref,
   meetings,
   phones,
-  socials,
   telHref,
 } from "@/lib/contact";
 
@@ -54,15 +53,6 @@ export default function Footer() {
 
         <div className="site-footer__bottom">
           <p>{meetings}</p>
-          <ul className="socials" aria-label="Social">
-            {socials.map((s) => (
-              <li key={s.href}>
-                <a href={s.href} target="_blank" rel="noopener noreferrer">
-                  {s.label}
-                </a>
-              </li>
-            ))}
-          </ul>
           <p className="fineprint">{contactNote}</p>
           <p className="fineprint">© {new Date().getFullYear()} OZ Business Solutions</p>
         </div>
