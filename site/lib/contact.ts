@@ -1,6 +1,7 @@
 /**
  * Single source of truth for every phone number and inbox on the site.
- * Phone numbers are the live lines. The inbox is hq@ozgrowthco.com.
+ * Phone numbers are the live lines. General, marketing and operations use hq@;
+ * sales uses sales@; client success and support use support@.
  */
 
 export type Department = {
@@ -18,8 +19,10 @@ export type PhoneLine = {
 };
 
 export const email = "hq@ozgrowthco.com";
+export const salesEmail = "sales@ozgrowthco.com";
+export const supportEmail = "support@ozgrowthco.com";
 
-export const contactNote = "Phone numbers are the live lines. Email hq@ozgrowthco.com.";
+export const contactNote = "Phone numbers are the live lines. Email hq@, sales@, or support@ozgrowthco.com.";
 
 export const meetings = "Meetings by appointment — by video call or at your place of business.";
 
@@ -39,19 +42,19 @@ export const departments: Department[] = [
     id: "sales",
     label: "Sales",
     purpose: "New projects, packages, quotes and booking a first call.",
-    email,
+    email: salesEmail,
   },
   {
     id: "success",
     label: "Client success",
     purpose: "Existing clients: your engagement, roadmap and reporting.",
-    email,
+    email: supportEmail,
   },
   {
     id: "support",
     label: "Support",
     purpose: "Something broken or urgent on a system we run for you.",
-    email,
+    email: supportEmail,
   },
   {
     id: "marketing",

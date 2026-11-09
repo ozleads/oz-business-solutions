@@ -26,7 +26,7 @@ const orbs = Array.from({ length: COUNT }, (_, i) => ({
 /**
  * Soft brass/ivory light orbs behind the homepage hero copy. On a fine pointer each orb eases a
  * per-orb fraction of the way toward the cursor with its own lag, plus a slow idle float. Touch
- * devices get the idle float via CSS only; reduced motion leaves them still.
+ * devices ease gently toward a finger and with page scroll. Reduced motion leaves them still.
  */
 export default function HeroOrbs() {
   const ref = useRef<HTMLDivElement>(null);
@@ -36,11 +36,105 @@ export default function HeroOrbs() {
     const hero = layer?.parentElement;
     if (!layer || !hero) return;
     if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
-    // Touch screens get a slow float only. A missing pointer (desktop with no device yet) still
-    // follows once mouse events arrive.
+    // Coarse pointers get a lighter loop: a finger and page scroll nudge the orbs. The fine-pointer
+    // loop below is unchanged. A desktop with no pointer device yet still follows once the mouse moves.
     if (window.matchMedia("(pointer: coarse)").matches) {
-      layer.classList.add("hero-orbs--idle");
-      return;
+      const els = Array.from(layer.children) as HTMLElement[];
+      let w = 0;
+      let h = 0;
+      const measure = () => {
+        const r = hero.getBoundingClientRect();
+        w = r.width;
+        h = r.height;
+      };
+      measure();
+
+      const state = orbs.map(() => ({ x: 0, y: 0 }));
+      const touch = { x: 0, y: 0, active: false };
+      let scrollShift = 0;
+      let raf = 0;
+      let visible = true;
+      let t0 = performance.now();
+
+      const tick = (now: number) => {
+        const t = (now - t0) / 1000;
+        for (let i = 0; i < COUNT; i++) {
+          const o = orbs[i];
+          const bx = o.x * w;
+          const by = o.y * h;
+          const ix = Math.sin(t * o.speed * 0.65 + o.phase) * o.amp * 0.45;
+          const iy = Math.cos(t * o.speed * 0.5 + o.phase) * o.amp * 0.35;
+          const pull = o.pull * 0.4;
+          const tx = (touch.active ? (touch.x - bx) * pull : 0) + ix;
+          const ty = (touch.active ? (touch.y - by) * pull : 0) + iy + scrollShift * (0.3 + o.pull);
+          const s = state[i];
+          s.x += (tx - s.x) * o.ease;
+          s.y += (ty - s.y) * o.ease;
+          els[i].style.transform = `translate3d(${(bx + s.x).toFixed(1)}px, ${(by + s.y).toFixed(1)}px, 0)`;
+        }
+        if (visible && !document.hidden) raf = requestAnimationFrame(tick);
+        else raf = 0;
+      };
+      const start = () => {
+        if (!raf && visible && !document.hidden) raf = requestAnimationFrame(tick);
+      };
+      const stop = () => {
+        cancelAnimationFrame(raf);
+        raf = 0;
+      };
+      const place = (e: PointerEvent) => {
+        const r = hero.getBoundingClientRect();
+        touch.x = e.clientX - r.left;
+        touch.y = e.clientY - r.top;
+        touch.active = true;
+      };
+      const onDown = (e: PointerEvent) => {
+        if (e.pointerType === "mouse") return;
+        place(e);
+      };
+      const onMove = (e: PointerEvent) => {
+        if (!touch.active || e.pointerType === "mouse") return;
+        place(e);
+      };
+      const onUp = (e: PointerEvent) => {
+        if (e.pointerType === "mouse") return;
+        touch.active = false;
+      };
+      const onScroll = () => {
+        const r = hero.getBoundingClientRect();
+        const viewed = Math.min(1, Math.max(0, -r.top / Math.max(r.height, 1)));
+        scrollShift = (viewed - 0.12) * 26;
+      };
+      const onVis = () => (document.hidden ? stop() : start());
+      const io = new IntersectionObserver(([entry]) => {
+        visible = entry.isIntersecting;
+        if (visible) start();
+        else stop();
+      });
+      io.observe(hero);
+      hero.addEventListener("pointerdown", onDown, { passive: true });
+      hero.addEventListener("pointermove", onMove, { passive: true });
+      window.addEventListener("pointerup", onUp, { passive: true });
+      window.addEventListener("pointercancel", onUp, { passive: true });
+      window.addEventListener("scroll", onScroll, { passive: true });
+      window.addEventListener("resize", measure, { passive: true });
+      document.addEventListener("visibilitychange", onVis);
+      layer.classList.add("is-live");
+      onScroll();
+      t0 = performance.now();
+      start();
+
+      return () => {
+        stop();
+        io.disconnect();
+        hero.removeEventListener("pointerdown", onDown);
+        hero.removeEventListener("pointermove", onMove);
+        window.removeEventListener("pointerup", onUp);
+        window.removeEventListener("pointercancel", onUp);
+        window.removeEventListener("scroll", onScroll);
+        window.removeEventListener("resize", measure);
+        document.removeEventListener("visibilitychange", onVis);
+      };
     }
 
     const els = Array.from(layer.children) as HTMLElement[];

@@ -17,12 +17,13 @@ export const services: Service[] = [
     slug: "growth",
     index: "01",
     title: "Growth strategy & expansion",
-    short: "Know where the next customers come from — and the order to go after them.",
+    short: "Know where the next customers come from — professional website building included — and the order to go after them.",
     summary:
       "We look at the whole business before touching a single campaign: where revenue comes from, where it leaks, and which moves are worth making next.",
     includes: [
       "Business and revenue audits",
       "90-day growth roadmaps",
+      "Professional website building",
       "Market and competitor research",
       "Expansion planning — new locations, offers, regions",
       "Pricing and offer review",

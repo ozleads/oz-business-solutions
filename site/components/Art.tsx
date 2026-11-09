@@ -4,6 +4,8 @@
  * All graphics are decorative and hidden from assistive tech.
  */
 
+import CoarseOrbit from "./CoarseOrbit";
+
 type ArtProps = { className?: string };
 
 const svgProps = {
@@ -382,7 +384,7 @@ export function Topography({ className, rings = 14 }: ArtProps & { rings?: numbe
 /** Concentric orbits, arcs and grid crosses split into depth layers (used for pointer parallax). */
 export function OrbitLayers() {
   return (
-    <div className="orbit-layers" aria-hidden="true">
+    <CoarseOrbit>
       <svg viewBox="0 0 600 600" className="orbit-layer" data-depth="0.4" {...svgProps}>
         <circle cx="300" cy="300" r="270" className="dim" />
         <circle cx="300" cy="300" r="190" className="dim" strokeDasharray="2 6" />
@@ -402,7 +404,7 @@ export function OrbitLayers() {
           <path key={i} d={`M${x - 7} ${y}h14M${x} ${y - 7}v14`} className="b" />
         ))}
       </svg>
-    </div>
+    </CoarseOrbit>
   );
 }
 

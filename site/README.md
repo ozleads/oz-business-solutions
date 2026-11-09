@@ -35,10 +35,11 @@ updates on the next build.
 - `phones`: the two live lines, United States and Canada. Each has a display string and a `tel` value
   (`+12053089904`, `+16477137349`). `telHref()` turns that into the `tel:` link.
 - `departments`: label, one-line purpose and `email`. Department cards and contact lines show the email only.
-- `bookCallHref`: currently a pre-addressed email to Sales. Swap it for a scheduling link (Calendly, Cal.com,
+- `bookCallHref`: a pre-addressed email to sales@ozgrowthco.com. Swap it for a scheduling link (Calendly, Cal.com,
   Google appointment page) when you have one.
-- `email`: the live inbox, `hq@ozgrowthco.com`. Every department card, contact line, and the book-a-call link uses it.
-- `contactNote`: phone numbers are the live lines; the email is hq@ozgrowthco.com.
+- `email`: hq@ozgrowthco.com for General, Marketing and Operations. Sales is sales@ozgrowthco.com.
+  Client success and Support are support@ozgrowthco.com.
+- `contactNote`: phone numbers are the live lines; the three inboxes are named in the note.
 
 ### Connecting the contact form
 
