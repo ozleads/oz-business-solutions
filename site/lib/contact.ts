@@ -1,6 +1,6 @@
 /**
  * Single source of truth for every phone number, inbox and social link on the site.
- * Phone numbers are the live lines. Email addresses are still placeholders.
+ * Phone numbers are the live lines. The inbox is hq@ozgrowthco.com.
  */
 
 export type Department = {
@@ -17,7 +17,9 @@ export type PhoneLine = {
   tel: string;
 };
 
-export const contactNote = "Phone numbers are the live lines. Email addresses are still placeholders.";
+export const email = "hq@ozgrowthco.com";
+
+export const contactNote = "Phone numbers are the live lines. Email hq@ozgrowthco.com.";
 
 export const meetings = "Meetings by appointment — by video call or at your place of business.";
 
@@ -31,37 +33,37 @@ export const departments: Department[] = [
     id: "general",
     label: "General",
     purpose: "Not sure where to start? We’ll route you to the right partner.",
-    email: "hello@ozbusinesssolutions.com",
+    email,
   },
   {
     id: "sales",
     label: "Sales",
     purpose: "New projects, packages, quotes and booking a first call.",
-    email: "sales@ozbusinesssolutions.com",
+    email,
   },
   {
     id: "success",
     label: "Client success",
     purpose: "Existing clients: your engagement, roadmap and reporting.",
-    email: "success@ozbusinesssolutions.com",
+    email,
   },
   {
     id: "support",
     label: "Support",
     purpose: "Something broken or urgent on a system we run for you.",
-    email: "support@ozbusinesssolutions.com",
+    email,
   },
   {
     id: "marketing",
     label: "Marketing",
     purpose: "Brand, websites, SEO, ads, content and reviews.",
-    email: "marketing@ozbusinesssolutions.com",
+    email,
   },
   {
     id: "operations",
     label: "Operations",
     purpose: "SOPs, automation, software setup and dashboards.",
-    email: "ops@ozbusinesssolutions.com",
+    email,
   },
 ];
 

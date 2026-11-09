@@ -38,7 +38,8 @@ updates on the next build.
 - `socials`: LinkedIn, Instagram, X URLs.
 - `bookCallHref`: currently a pre-addressed email to Sales. Swap it for a scheduling link (Calendly, Cal.com,
   Google appointment page) when you have one.
-- `contactNote`: phone numbers are the live lines; email addresses are still placeholders.
+- `email`: the live inbox, `hq@ozgrowthco.com`. Every department card, contact line, and the book-a-call link uses it.
+- `contactNote`: phone numbers are the live lines; the email is hq@ozgrowthco.com.
 
 ### Connecting the contact form
 
