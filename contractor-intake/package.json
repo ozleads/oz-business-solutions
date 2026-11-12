@@ -1,0 +1,8 @@
+{
+  "name": "oz-leads-intake",
+  "private": true,
+  "description": "Public contractor intake form and private submissions list for OZ Leads.",
+  "scripts": {
+    "start": "node server.js"
+  }
+}
