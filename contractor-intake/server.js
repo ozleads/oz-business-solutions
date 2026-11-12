@@ -16,25 +16,25 @@ const MAX_SUBMISSION_BYTES = 48 * 1024 * 1024;
 const MAX_BODY = MAX_SUBMISSION_BYTES + (1024 * 1024);
 const MAX_STORE_BYTES = 200 * 1024 * 1024;
 const MAX_SUBMISSIONS = 40;
-const PER_IP_SUBMISSIONS = 3;
-const PER_IP_BYTES = MAX_SUBMISSION_BYTES;
 const MAX_TEXT = 20000;
 const MAX_TEXT_TOTAL = 64 * 1024;
 const MAX_PARTS = 100;
-const MAX_INFLIGHT = 1;
+const MAX_READS = 2;
 const SUBMIT_WINDOW_MS = 60 * 60 * 1000;
 const SUBMIT_MAX_ATTEMPTS = 8;
 const SUBMIT_GAP_MS = 10 * 1000;
+const SUBMIT_IDLE_MS = 15 * 1000;
+const SUBMIT_TOTAL_MS = 60 * 1000;
 const KEY_WINDOW_MS = 15 * 60 * 1000;
 const KEY_MAX_FAILS = 8;
 const KEY_FAIL_DELAY_MS = 400;
+const LOGIN_IDLE_MS = 8 * 1000;
+const LOGIN_TOTAL_MS = 15 * 1000;
 const MAP_MAX = 500;
 const SESSION_MS = 12 * 60 * 60 * 1000;
 const LOGIN_BODY_MAX = 4096;
 const LIMITS = {
   maxSubmissions: MAX_SUBMISSIONS,
-  perIp: PER_IP_SUBMISSIONS,
-  perIpBytes: PER_IP_BYTES,
   maxBytes: MAX_STORE_BYTES
 };
 
@@ -130,27 +130,60 @@ function splitMultipart(body, boundary) {
   return { fields, files };
 }
 
-function readChunks(req, limit) {
+function readChunks(req, limit, timing) {
+  const idleMs = (timing && timing.idleMs) || SUBMIT_IDLE_MS;
+  const totalMs = (timing && timing.totalMs) || SUBMIT_TOTAL_MS;
   return new Promise((resolve, reject) => {
     const declared = Number(req.headers['content-length'] || 0);
     if (declared > limit) {
       reject(new HttpError(400, 'The upload is too large.'));
-      req.destroy();
       return;
     }
     const chunks = [];
     let size = 0;
     let failed = false;
+    let idleTimer;
+    let totalTimer;
+
+    function onSocketTimeout() {
+      fail(new HttpError(408, 'The upload took too long. Please try again.'));
+    }
+
+    function cleanup(keepAlive) {
+      clearTimeout(idleTimer);
+      clearTimeout(totalTimer);
+      if (req.socket && typeof req.socket.setTimeout === 'function') {
+        req.socket.setTimeout(keepAlive ? 0 : 2000);
+        if (keepAlive) req.socket.removeListener('timeout', onSocketTimeout);
+      }
+    }
 
     function fail(err) {
       if (failed) return;
       failed = true;
-      reject(err instanceof HttpError ? err : new HttpError(400, 'The upload could not be read.'));
-      req.destroy();
+      cleanup();
+      reject(err instanceof HttpError ? err : new HttpError(408, 'The upload took too long. Please try again.'));
+    }
+
+    function armIdle() {
+      clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => {
+        fail(new HttpError(408, 'The upload took too long. Please try again.'));
+      }, idleMs);
+    }
+
+    totalTimer = setTimeout(() => {
+      fail(new HttpError(408, 'The upload took too long. Please try again.'));
+    }, totalMs);
+    armIdle();
+    if (req.socket && typeof req.socket.setTimeout === 'function') {
+      req.socket.setTimeout(idleMs);
+      req.socket.on('timeout', onSocketTimeout);
     }
 
     req.on('data', (chunk) => {
       if (failed) return;
+      armIdle();
       size += chunk.length;
       if (size > limit) {
         fail(new HttpError(400, 'The upload is too large.'));
@@ -161,6 +194,8 @@ function readChunks(req, limit) {
     req.on('error', fail);
     req.on('end', () => {
       if (failed) return;
+      failed = true;
+      cleanup(true);
       resolve(Buffer.concat(chunks));
     });
   });
@@ -171,7 +206,7 @@ function parseMultipart(req) {
   const match = header.match(/boundary=(?:"([^"]+)"|([^;]+))/i);
   if (!match) return Promise.reject(new HttpError(400, 'Submit the form from the brief page.'));
   const boundary = (match[1] || match[2] || '').trim();
-  return readChunks(req, MAX_BODY).then((body) => splitMultipart(body, boundary));
+  return readChunks(req, MAX_BODY, { idleMs: SUBMIT_IDLE_MS, totalMs: SUBMIT_TOTAL_MS }).then((body) => splitMultipart(body, boundary));
 }
 
 function field(fields, key) {
@@ -195,9 +230,7 @@ function rememberImage(image, files, extra) {
   return Object.assign({ storedName, originalName: image.originalName }, extra || {});
 }
 
-function roomError(reason) {
-  if (reason === 'ip') throw new HttpError(429, 'Please wait before sending another brief.');
-  if (reason === 'ip-bytes') throw new HttpError(429, 'Please wait before sending more photos.');
+function roomError() {
   throw new HttpError(429, 'We can\'t take more briefs right now. Please try again later.');
 }
 
@@ -275,7 +308,7 @@ async function buildSubmission(parsed, ip) {
   };
 
   const saved = await store.saveSubmission(submission, storedFiles, LIMITS);
-  if (!saved.ok) roomError(saved.reason);
+  if (!saved.ok) roomError();
   return submission;
 }
 
@@ -437,8 +470,10 @@ function closedPage() {
 }
 
 const keyFails = new Map();
+const keyBusy = new Set();
 const submitAttempts = new Map();
-let inflight = 0;
+const submitBusy = new Set();
+let reading = 0;
 let storeQueue = Promise.resolve();
 
 function remember(map, key, value) {
@@ -487,31 +522,17 @@ function listKey() {
   return String(process.env.INTAKE_LIST_KEY || '');
 }
 
-function issueSession(secret) {
-  const exp = String(Date.now() + SESSION_MS);
-  const mac = crypto.createHmac('sha256', secret).update('oz-leads-inbox-v1:' + exp).digest('base64url');
-  return exp + '.' + mac;
+function passwordTag(secret) {
+  return crypto.createHash('sha256').update(String(secret), 'utf8').digest('hex').slice(0, 32);
 }
 
-function sessionValid(secret, token) {
-  if (!secret || !token || token.length > 200) return false;
-  const dot = token.indexOf('.');
-  if (dot <= 0) return false;
-  const expText = token.slice(0, dot);
-  const mac = token.slice(dot + 1);
-  if (!/^\d{10,16}$/.test(expText)) return false;
-  const exp = Number(expText);
-  const now = Date.now();
-  if (!Number.isFinite(exp) || exp < now || exp > now + SESSION_MS + 60000) return false;
-  return keysEqual(mac, crypto.createHmac('sha256', secret).update('oz-leads-inbox-v1:' + expText).digest('base64url'));
-}
-
-function authorize(req) {
+async function authorize(req) {
   const expected = listKey();
   if (!expected) return { ok: false, reason: 'unset' };
+  const token = readCookieValue(req, 'intake_session');
+  if (await store.sessionActive(token, passwordTag(expected))) return { ok: true, token };
   if (keyLocked(clientIp(req))) return { ok: false, reason: 'locked' };
-  if (!sessionValid(expected, readCookieValue(req, 'intake_session'))) return { ok: false, reason: 'missing' };
-  return { ok: true };
+  return { ok: false, reason: 'missing' };
 }
 
 function cookieParts(req, value, maxAge) {
@@ -523,8 +544,8 @@ function cookieParts(req, value, maxAge) {
   return parts.join('; ');
 }
 
-function sessionCookie(req, secret) {
-  return cookieParts(req, issueSession(secret), Math.floor(SESSION_MS / 1000));
+function sessionCookie(req, sessionId) {
+  return cookieParts(req, sessionId, Math.floor(SESSION_MS / 1000));
 }
 
 function clearCookie(req) {
@@ -532,12 +553,9 @@ function clearCookie(req) {
 }
 
 function clientIp(req) {
-  const forwarded = req.headers['x-forwarded-for'];
-  if (typeof forwarded === 'string' && forwarded.trim()) {
-    const hop = forwarded.split(',')[0].trim();
-    if (hop) return hop.slice(0, 80);
-  }
-  return (req.socket && req.socket.remoteAddress) || 'unknown';
+  const address = req && req.socket && req.socket.remoteAddress;
+  const ip = String(address || '').trim();
+  return ip ? ip.slice(0, 80) : 'unknown';
 }
 
 function allowSubmitAttempt(ip) {
@@ -643,7 +661,7 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'POST' && pathname === '/submit') {
       const ip = clientIp(req);
-      if (inflight >= MAX_INFLIGHT) {
+      if (submitBusy.has(ip) || reading >= MAX_READS) {
         send(res, 429, layout('Please wait', '<p class="kicker">OZ Leads</p><h1>Please wait a moment and try again.</h1><p><a href="/">Back to the brief</a></p>', true));
         return;
       }
@@ -651,12 +669,14 @@ const server = http.createServer(async (req, res) => {
         send(res, 429, layout('Please wait', '<p class="kicker">OZ Leads</p><h1>Please wait before sending another brief.</h1><p><a href="/">Back to the brief</a></p>', true));
         return;
       }
-      inflight += 1;
+      submitBusy.add(ip);
+      reading += 1;
       try {
         const parsed = await parseMultipart(req);
         await enqueueStore(() => buildSubmission(parsed, ip));
       } finally {
-        inflight -= 1;
+        reading -= 1;
+        submitBusy.delete(ip);
       }
       redirect(res, '/thanks');
       return;
@@ -678,46 +698,51 @@ const server = http.createServer(async (req, res) => {
         send(res, 200, closedPage());
         return;
       }
-      if (keyLocked(ip)) {
+      if (keyLocked(ip) || keyBusy.has(ip)) {
         await wait(KEY_FAIL_DELAY_MS);
+        const locked = keyLocked(ip);
         send(res, 429, layout('Inbox · OZ Leads', `
           <p class="kicker">Private</p>
           <h1>Inbox</h1>
-          <p class="warn">Too many tries. Wait 15 minutes, then try again.</p>
+          <p class="warn">${locked ? 'Too many tries. Wait 15 minutes, then try again.' : 'Please wait a moment and try again.'}</p>
         `, true));
         return;
       }
-      const type = String(req.headers['content-type'] || '');
-      if (!type.includes('application/x-www-form-urlencoded')) {
-        throw new HttpError(400, 'Use the password form on this page.');
+      keyBusy.add(ip);
+      try {
+        const type = String(req.headers['content-type'] || '');
+        if (!type.includes('application/x-www-form-urlencoded')) {
+          throw new HttpError(400, 'Use the password form on this page.');
+        }
+        const body = await readChunks(req, LOGIN_BODY_MAX, { idleMs: LOGIN_IDLE_MS, totalMs: LOGIN_TOTAL_MS });
+        const given = new URLSearchParams(body.toString('utf8')).get('password') || '';
+        if (!given || given.length > 200 || !keysEqual(given, expected)) {
+          noteKeyFail(ip);
+          await wait(KEY_FAIL_DELAY_MS);
+          const locked = keyLocked(ip);
+          send(res, locked ? 429 : 200, locked
+            ? layout('Inbox · OZ Leads', '<p class="kicker">Private</p><h1>Inbox</h1><p class="warn">Too many tries. Wait 15 minutes, then try again.</p>', true)
+            : passwordPage('That password is wrong.'));
+          return;
+        }
+        keyFails.delete(ip);
+        const sessionId = await store.createSession(passwordTag(expected), new Date(Date.now() + SESSION_MS).toISOString());
+        redirect(res, '/inbox', sessionCookie(req, sessionId));
+      } finally {
+        keyBusy.delete(ip);
       }
-      const body = await readChunks(req, LOGIN_BODY_MAX);
-      const given = new URLSearchParams(body.toString('utf8')).get('password') || '';
-      if (!given || given.length > 200 || !keysEqual(given, expected)) {
-        noteKeyFail(ip);
-        await wait(KEY_FAIL_DELAY_MS);
-        const locked = keyLocked(ip);
-        send(res, locked ? 429 : 200, locked
-          ? layout('Inbox · OZ Leads', '<p class="kicker">Private</p><h1>Inbox</h1><p class="warn">Too many tries. Wait 15 minutes, then try again.</p>', true)
-          : passwordPage('That password is wrong.'));
-        return;
-      }
-      keyFails.delete(ip);
-      redirect(res, '/inbox', sessionCookie(req, expected));
       return;
     }
 
     if (req.method === 'POST' && pathname === '/inbox/logout') {
-      if (!authorize(req).ok) {
-        redirect(res, '/inbox');
-        return;
-      }
+      const auth = await authorize(req);
+      if (auth.ok) await store.revokeSession(auth.token);
       redirect(res, '/inbox', clearCookie(req));
       return;
     }
 
     if (req.method === 'GET' && pathname === '/inbox') {
-      const auth = authorize(req);
+      const auth = await authorize(req);
       if (!auth.ok) {
         if (auth.reason === 'unset') send(res, 200, closedPage());
         else if (auth.reason === 'locked') {
@@ -740,7 +765,7 @@ const server = http.createServer(async (req, res) => {
 
     const detail = pathname.match(/^\/submissions\/([a-z0-9]+)$/i);
     if (req.method === 'GET' && detail) {
-      if (!authorize(req).ok) {
+      if (!(await authorize(req)).ok) {
         redirect(res, '/inbox');
         return;
       }
@@ -759,7 +784,7 @@ const server = http.createServer(async (req, res) => {
 
     const media = pathname.match(/^\/media\/([a-z0-9]+)\/([a-z0-9]+\.(?:png|jpg|jpeg|webp|gif))$/i);
     if (req.method === 'GET' && media) {
-      if (!authorize(req).ok) {
+      if (!(await authorize(req)).ok) {
         send(res, 404, 'Not found', 'text/plain; charset=utf-8');
         return;
       }
@@ -784,10 +809,15 @@ const server = http.createServer(async (req, res) => {
     const status = err.status || 500;
     const message = status === 500 ? 'Something went wrong while saving the brief.' : err.message;
     if (status === 500) console.error('Intake request failed');
+    const closeUpload = () => {
+      if (typeof req.destroy === 'function') req.destroy();
+    };
     if (!res.headersSent) {
+      res.on('finish', closeUpload);
       send(res, status, layout('Could not save', `<p class="kicker">OZ Leads</p><h1>${esc(message)}</h1><p><a href="/">Back to the brief</a></p>`, true));
     } else {
       res.end();
+      closeUpload();
     }
   }
 });
@@ -823,11 +853,24 @@ async function runSelfTest() {
   if (keyLocked(lockIp)) throw new Error('locked too early');
   noteKeyFail(lockIp);
   if (!keyLocked(lockIp)) throw new Error('failed-key lockout missing');
-  const token = issueSession('correct horse');
-  if (token.includes('correct') || token.includes('horse')) throw new Error('session kept the password');
-  if (!sessionValid('correct horse', token) || sessionValid('other secret', token)) {
-    throw new Error('session check failed');
+  const forwarded = clientIp({
+    headers: { 'x-forwarded-for': '203.0.113.9, 198.51.100.1' },
+    socket: { remoteAddress: '192.0.2.10' }
+  });
+  if (forwarded !== '192.0.2.10') throw new Error('forwarded header was trusted');
+  const missingSocket = clientIp({ headers: { 'x-forwarded-for': '203.0.113.9' }, socket: {} });
+  if (missingSocket !== 'unknown') throw new Error('missing socket became a spoofed id');
+  const { EventEmitter } = require('events');
+  const slow = new EventEmitter();
+  slow.headers = {};
+  slow.destroy = function () {};
+  let sawTimeout = false;
+  try {
+    await readChunks(slow, 1000, { idleMs: 40, totalMs: 120 });
+  } catch (err) {
+    sawTimeout = err instanceof HttpError && err.status === 408;
   }
+  if (!sawTimeout) throw new Error('slow upload was not stopped');
   if (isStoredFileUrl('/submissions') || isStoredFileUrl('/') || isStoredFileUrl('/inbox')) {
     throw new Error('public urls were blocked');
   }
@@ -857,12 +900,26 @@ async function runSelfTest() {
   }
   const photo = await store.readFile(saved.id, saved.logo.storedName);
   if (!photo || !photo.equals(png)) throw new Error('saved photo did not match');
-  const blocked = await store.saveSubmission(
-    { id: 'secondbrief0001', createdAt: new Date().toISOString(), ipHash: 'x', businessName: 'B' },
+  const rotated = await store.saveSubmission(
+    { id: 'secondbrief0001', createdAt: new Date(Date.now() + 1000).toISOString(), ipHash: 'other-ip', businessName: 'B' },
     [],
-    { maxSubmissions: 1, perIp: 3, perIpBytes: 10, maxBytes: 10 }
+    { maxSubmissions: 1, maxBytes: 100000 }
   );
-  if (blocked.ok || blocked.reason !== 'full') throw new Error('submission cap failed');
+  if (!rotated.ok) throw new Error('oldest brief was not removed: ' + rotated.reason);
+  const afterCap = await store.listSubmissions();
+  if (afterCap.length !== 1 || afterCap[0].id !== 'secondbrief0001') throw new Error('cap did not drop the old brief');
+  const gone = await store.readFile(saved.id, saved.logo.storedName);
+  if (gone) throw new Error('old photo was kept');
+  const rateIp = '192.0.2.20';
+  if (!allowSubmitAttempt(rateIp) || allowSubmitAttempt(rateIp)) throw new Error('submit rate limit failed');
+  const sessionId = await store.createSession(passwordTag('correct horse'), new Date(Date.now() + SESSION_MS).toISOString());
+  if (sessionId.includes('correct') || sessionId.includes('horse')) throw new Error('session kept the password');
+  if (!await store.sessionActive(sessionId, passwordTag('correct horse'))) throw new Error('session was not saved');
+  await store.revokeSession(sessionId);
+  if (await store.sessionActive(sessionId, passwordTag('correct horse'))) throw new Error('logout did not revoke the session');
+  const replaced = await store.createSession(passwordTag('correct horse'), new Date(Date.now() + SESSION_MS).toISOString());
+  if (await store.sessionActive(replaced, passwordTag('other secret'))) throw new Error('old password still opened the inbox');
+  if (await store.sessionActive(replaced, passwordTag('correct horse'))) throw new Error('password change left the session alive');
   const page = renderSubmission(saved);
   if (page.includes('<script') || !page.includes('Acme Roofing') || !page.includes('/media/')) {
     throw new Error('inbox render failed');

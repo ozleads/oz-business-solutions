@@ -2,6 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 
 const MIGRATIONS = path.join(__dirname, 'migrations');
 
@@ -16,11 +17,8 @@ function serial(fn) {
   return run;
 }
 
-function migrationSql() {
-  return fs.readdirSync(MIGRATIONS)
-    .filter((name) => name.endsWith('.sql'))
-    .sort()
-    .map((name) => fs.readFileSync(path.join(MIGRATIONS, name), 'utf8'));
+function migrationNames() {
+  return fs.readdirSync(MIGRATIONS).filter((name) => name.endsWith('.sql')).sort();
 }
 
 function statements(sql) {
@@ -53,6 +51,17 @@ async function rowsOf(runner, text, params) {
   return result.rows;
 }
 
+async function applyPending(query) {
+  await query('create table if not exists schema_migrations (name text primary key, applied_at timestamptz not null default now())');
+  const done = new Set((await query('select name from schema_migrations')).map((row) => row.name));
+  for (const name of migrationNames()) {
+    if (done.has(name)) continue;
+    const sql = fs.readFileSync(path.join(MIGRATIONS, name), 'utf8');
+    for (const statement of statements(sql)) await query(statement);
+    await query('insert into schema_migrations (name) values ($1)', [name]);
+  }
+}
+
 async function initStore(options = {}) {
   const databaseUrl = options.local ? '' : String(process.env.DATABASE_URL || '').trim();
   if (databaseUrl) {
@@ -64,12 +73,10 @@ async function initStore(options = {}) {
     mode = 'postgres';
     const client = await pool.connect();
     try {
-      const found = await client.query("select to_regclass('public.submissions') as name");
-      if (!found.rows[0] || !found.rows[0].name) {
-        for (const sql of migrationSql()) {
-          for (const statement of statements(sql)) await client.query(statement);
-        }
-      }
+      await applyPending(async (text, params) => {
+        const result = await client.query(text, params);
+        return result.rows;
+      });
     } finally {
       client.release();
     }
@@ -79,29 +86,18 @@ async function initStore(options = {}) {
   const { PGlite } = require('@electric-sql/pglite');
   local = new PGlite();
   mode = 'pglite';
-  const found = await local.query("select to_regclass('public.submissions') as name");
-  if (!found.rows[0] || !found.rows[0].name) {
-    for (const sql of migrationSql()) await local.exec(sql);
-  }
+  await applyPending(async (text, params) => {
+    const result = await local.query(text, params);
+    return result.rows;
+  });
 }
 
-async function room(runner, ipHash) {
+async function totals(runner) {
   const total = await rowsOf(runner, 'select count(*)::int as n from submissions', []);
-  const mine = await rowsOf(runner, 'select count(*)::int as n from submissions where ip_hash = $1', [ipHash]);
   const allBytes = await rowsOf(runner, 'select coalesce(sum(octet_length(bytes)), 0)::bigint as n from submission_files', []);
-  const mineBytes = await rowsOf(
-    runner,
-    `select coalesce(sum(octet_length(f.bytes)), 0)::bigint as n
-     from submission_files f
-     join submissions s on s.id = f.submission_id
-     where s.ip_hash = $1`,
-    [ipHash]
-  );
   return {
     total: asNumber(total[0].n),
-    mine: asNumber(mine[0].n),
-    bytes: asNumber(allBytes[0].n),
-    mineBytes: asNumber(mineBytes[0].n)
+    bytes: asNumber(allBytes[0].n)
   };
 }
 
@@ -131,13 +127,31 @@ async function saveSubmission(submission, files, limits) {
   });
 }
 
+async function deleteSubmission(runner, id) {
+  await runner.query('delete from submission_files where submission_id = $1', [id]);
+  await runner.query('delete from submissions where id = $1', [id]);
+}
+
 async function writeSubmission(runner, submission, files, limits) {
   await runner.query('select pg_advisory_xact_lock(7272742)');
-  const stats = await room(runner, submission.ipHash);
   const adding = files.reduce((sum, file) => sum + file.bytes.length, 0);
+  let stats = await totals(runner);
+  let removed = 0;
+  while (
+    removed <= limits.maxSubmissions
+    && (stats.total >= limits.maxSubmissions || stats.bytes + adding > limits.maxBytes)
+  ) {
+    const oldest = await rowsOf(
+      runner,
+      'select id from submissions order by created_at asc, id asc limit 1',
+      []
+    );
+    if (!oldest.length) break;
+    await deleteSubmission(runner, oldest[0].id);
+    removed += 1;
+    stats = await totals(runner);
+  }
   if (stats.total >= limits.maxSubmissions) return { ok: false, reason: 'full' };
-  if (stats.mine >= limits.perIp) return { ok: false, reason: 'ip' };
-  if (stats.mineBytes + adding > limits.perIpBytes) return { ok: false, reason: 'ip-bytes' };
   if (stats.bytes + adding > limits.maxBytes) return { ok: false, reason: 'bytes' };
   await runner.query(
     'insert into submissions (id, created_at, ip_hash, payload) values ($1, $2, $3, $4::jsonb)',
@@ -194,10 +208,57 @@ async function readFile(id, storedName) {
   });
 }
 
+async function withRunner(fn) {
+  if (mode === 'postgres') {
+    const client = await pool.connect();
+    try {
+      return await fn(client);
+    } finally {
+      client.release();
+    }
+  }
+  return fn(local);
+}
+
+async function createSession(keyTag, expiresAt) {
+  const id = crypto.randomBytes(32).toString('base64url');
+  await serial(() => withRunner(async (runner) => {
+    await runner.query('delete from inbox_sessions where expires_at <= now()');
+    await runner.query(
+      'insert into inbox_sessions (id, key_tag, expires_at) values ($1, $2, $3)',
+      [id, keyTag, expiresAt]
+    );
+  }));
+  return id;
+}
+
+async function sessionActive(id, keyTag) {
+  if (!/^[A-Za-z0-9_-]{20,128}$/.test(String(id || ''))) return false;
+  return serial(() => withRunner(async (runner) => {
+    await runner.query('delete from inbox_sessions where expires_at <= now() or key_tag <> $1', [keyTag]);
+    const found = await rowsOf(
+      runner,
+      'select id from inbox_sessions where id = $1 and key_tag = $2 and expires_at > now()',
+      [id, keyTag]
+    );
+    return found.length > 0;
+  }));
+}
+
+async function revokeSession(id) {
+  if (!/^[A-Za-z0-9_-]{20,128}$/.test(String(id || ''))) return;
+  await serial(() => withRunner(async (runner) => {
+    await runner.query('delete from inbox_sessions where id = $1', [id]);
+  }));
+}
+
 module.exports = {
   initStore,
   saveSubmission,
   listSubmissions,
   getSubmission,
-  readFile
+  readFile,
+  createSession,
+  sessionActive,
+  revokeSession
 };
