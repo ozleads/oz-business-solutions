@@ -2,6 +2,7 @@
 
 const http = require('http');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 
@@ -9,12 +10,47 @@ const HOST = process.env.PORT ? '0.0.0.0' : '127.0.0.1';
 const PORT = Number(process.env.PORT) || 4173;
 const ROOT = __dirname;
 const FORM_FILE = path.join(ROOT, 'public', 'index.html');
-const DATA_DIR = path.join(ROOT, 'data');
-const DATA_FILE = path.join(DATA_DIR, 'submissions.json');
-const UPLOAD_ROOT = path.join(ROOT, 'uploads');
-const MAX_BODY = 80 * 1024 * 1024;
 const MAX_FILE = 15 * 1024 * 1024;
+const MAX_FILES = 14;
+const MAX_SUBMISSION_BYTES = 48 * 1024 * 1024;
+const MAX_BODY = MAX_SUBMISSION_BYTES + (1024 * 1024);
+const MAX_STORE_BYTES = 200 * 1024 * 1024;
+const MAX_SUBMISSIONS = 40;
+const PER_IP_SUBMISSIONS = 3;
+const PER_IP_BYTES = MAX_SUBMISSION_BYTES;
 const MAX_TEXT = 20000;
+const MAX_TEXT_TOTAL = 64 * 1024;
+const MAX_PARTS = 100;
+const MAX_INFLIGHT = 1;
+const SUBMIT_WINDOW_MS = 60 * 60 * 1000;
+const SUBMIT_MAX_ATTEMPTS = 8;
+const SUBMIT_GAP_MS = 10 * 1000;
+const KEY_WINDOW_MS = 15 * 60 * 1000;
+const KEY_MAX_FAILS = 8;
+const KEY_FAIL_DELAY_MS = 400;
+const MAP_MAX = 500;
+
+function isInside(parent, child) {
+  const base = path.resolve(parent);
+  const target = path.resolve(child);
+  if (target === base) return true;
+  const rel = path.relative(base, target);
+  return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
+}
+
+function resolveStoreRoot() {
+  const fallback = path.join(os.tmpdir(), 'oz-leads-intake');
+  const requested = process.env.INTAKE_STORE_DIR;
+  if (!requested) return fallback;
+  const chosen = path.resolve(requested);
+  if (isInside(ROOT, chosen)) return fallback;
+  return chosen;
+}
+
+const STORE_ROOT = resolveStoreRoot();
+const DATA_DIR = path.join(STORE_ROOT, 'data');
+const DATA_FILE = path.join(DATA_DIR, 'submissions.json');
+const UPLOAD_ROOT = path.join(STORE_ROOT, 'uploads');
 
 class HttpError extends Error {
   constructor(status, message) {
@@ -42,6 +78,59 @@ function saveDB(data) {
   const tmp = DATA_FILE + '.tmp';
   fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
   fs.renameSync(tmp, DATA_FILE);
+}
+
+function directoryBytes(dir) {
+  const root = path.resolve(dir);
+  if (!fs.existsSync(root)) return 0;
+  let total = 0;
+  const stack = [root];
+  while (stack.length) {
+    const current = stack.pop();
+    if (!isInside(root, current)) continue;
+    let entries = [];
+    try {
+      entries = fs.readdirSync(current, { withFileTypes: true });
+    } catch (err) {
+      continue;
+    }
+    for (const entry of entries) {
+      if (entry.isSymbolicLink()) continue;
+      const child = path.join(current, entry.name);
+      if (entry.isDirectory()) stack.push(child);
+      else if (entry.isFile()) {
+        try {
+          total += fs.statSync(child).size;
+        } catch (err) {
+          continue;
+        }
+      }
+    }
+  }
+  return total;
+}
+
+function hashIp(ip) {
+  return crypto.createHash('sha256').update(String(ip)).digest('hex').slice(0, 20);
+}
+
+function assertRoom(imageBytes, ipHash) {
+  const db = loadDB();
+  if (db.submissions.length >= MAX_SUBMISSIONS) {
+    throw new HttpError(429, 'We can\'t take more briefs right now. Please try again later.');
+  }
+  const mine = db.submissions.filter((item) => item.ipHash === ipHash);
+  if (mine.length >= PER_IP_SUBMISSIONS) {
+    throw new HttpError(429, 'Please wait before sending another brief.');
+  }
+  let mineBytes = 0;
+  for (const item of mine) mineBytes += directoryBytes(path.join(UPLOAD_ROOT, item.id));
+  if (mineBytes + imageBytes > PER_IP_BYTES) {
+    throw new HttpError(429, 'Please wait before sending more photos.');
+  }
+  if (directoryBytes(UPLOAD_ROOT) + imageBytes > MAX_STORE_BYTES) {
+    throw new HttpError(429, 'We can\'t take more photos right now. Please try again later.');
+  }
 }
 
 function esc(value) {
@@ -77,12 +166,15 @@ function splitMultipart(body, boundary) {
   const delim = Buffer.from('--' + boundary);
   const fields = {};
   const files = [];
+  let textTotal = 0;
+  let fileTotal = 0;
   let start = body.indexOf(delim);
   if (start < 0) throw new HttpError(400, 'The upload could not be read.');
   start += delim.length;
   let parts = 0;
 
-  while (start < body.length && parts < 80) {
+  while (start < body.length) {
+    if (parts >= MAX_PARTS) throw new HttpError(400, 'The form has too many fields.');
     if (body[start] === 45 && body[start + 1] === 45) break;
     if (body[start] === 13 && body[start + 1] === 10) start += 2;
     const headerEnd = body.indexOf(Buffer.from('\r\n\r\n'), start);
@@ -99,11 +191,16 @@ function splitMultipart(body, boundary) {
       if (filename != null) {
         if (content.length > MAX_FILE) throw new HttpError(400, 'Each photo must be 15 MB or smaller.');
         if (filename && content.length) {
+          fileTotal += content.length;
+          if (files.length >= MAX_FILES) throw new HttpError(400, 'Too many photos.');
+          if (fileTotal > MAX_SUBMISSION_BYTES) throw new HttpError(400, 'The photos are too large together.');
           files.push({ field: name, filename, buffer: content });
         }
       } else if (content.length > MAX_TEXT) {
         throw new HttpError(400, 'One of the text fields is too long.');
       } else {
+        textTotal += content.length;
+        if (textTotal > MAX_TEXT_TOTAL) throw new HttpError(400, 'The form is too long.');
         const val = content.toString('utf8');
         if (fields[name] === undefined) fields[name] = val;
         else if (Array.isArray(fields[name])) fields[name].push(val);
@@ -178,7 +275,7 @@ function writeImage(dir, image) {
   return { storedName, originalName: image.originalName };
 }
 
-function buildSubmission(parsed) {
+function buildSubmission(parsed, ip) {
   const { fields, files } = parsed;
   const businessName = field(fields, 'businessName');
   const phone = field(fields, 'phone');
@@ -216,14 +313,23 @@ function buildSubmission(parsed) {
     if (name || quote) reviews.push({ name, quote });
   }
 
+  let imageBytes = 0;
+  if (logo) imageBytes += logo.buffer.length;
+  if (team) imageBytes += team.buffer.length;
+  for (const project of projects) imageBytes += project.image.buffer.length;
+  const ipHash = hashIp(ip || '');
+  assertRoom(imageBytes, ipHash);
+
   const id = Date.now().toString(36) + crypto.randomBytes(4).toString('hex');
   const dir = path.join(UPLOAD_ROOT, id);
+  if (!isInside(UPLOAD_ROOT, dir)) throw new HttpError(400, 'The upload could not be saved.');
   fs.mkdirSync(dir, { recursive: true });
 
   const submission = {
     id,
     createdAt: new Date().toISOString(),
     sample: false,
+    ipHash,
     businessName,
     phone,
     city,
@@ -365,18 +471,131 @@ function renderSubmission(sub) {
     ${reviews ? `<h3>Reviews</h3>${reviews}` : ''}
     ${social ? `<h3>Social</h3><ul>${social}</ul>` : ''}
     ${(team || projects) ? `<h3>Photos</h3><div class="shots">${team}${projects}</div>` : ''}
-    <p class="meta"><a href="/submissions/${esc(sub.id)}">Open this submission</a> · files in uploads/${esc(sub.id)}/</p>
+    <p class="meta"><a href="/submissions/${esc(sub.id)}">Open this submission</a></p>
   </article>`;
 }
 
-function listAllowed(url) {
+const keyFails = new Map();
+const submitAttempts = new Map();
+let inflight = 0;
+let storeQueue = Promise.resolve();
+
+function remember(map, key, value) {
+  if (!map.has(key) && map.size >= MAP_MAX) map.delete(map.keys().next().value);
+  map.set(key, value);
+}
+
+function keysEqual(given, expected) {
+  const ha = crypto.createHash('sha256').update(String(given), 'utf8').digest();
+  const hb = crypto.createHash('sha256').update(String(expected), 'utf8').digest();
+  return crypto.timingSafeEqual(ha, hb);
+}
+
+function keyLocked(ip) {
+  const row = keyFails.get(ip);
+  if (!row) return false;
+  if (Date.now() - row.start > KEY_WINDOW_MS) {
+    keyFails.delete(ip);
+    return false;
+  }
+  return row.count >= KEY_MAX_FAILS;
+}
+
+function noteKeyFail(ip) {
+  const now = Date.now();
+  const row = keyFails.get(ip);
+  if (!row || now - row.start > KEY_WINDOW_MS) {
+    remember(keyFails, ip, { count: 1, start: now });
+    return;
+  }
+  if (row.count < KEY_MAX_FAILS) row.count += 1;
+}
+
+function readCookie(req, name) {
+  const header = req.headers.cookie || '';
+  for (const part of header.split(';')) {
+    const eq = part.indexOf('=');
+    if (eq === -1) continue;
+    if (part.slice(0, eq).trim() !== name) continue;
+    try {
+      return Buffer.from(part.slice(eq + 1).trim(), 'base64url').toString('utf8');
+    } catch (err) {
+      return '';
+    }
+  }
+  return '';
+}
+
+function clientIp(req) {
+  const forwarded = req.headers['x-forwarded-for'];
+  if (typeof forwarded === 'string' && forwarded.trim()) {
+    const hop = forwarded.split(',')[0].trim();
+    if (hop) return hop.slice(0, 80);
+  }
+  return (req.socket && req.socket.remoteAddress) || 'unknown';
+}
+
+function authorize(req, url) {
   const expected = process.env.INTAKE_LIST_KEY || '';
-  if (!expected) return false;
-  const given = url.searchParams.get('key') || '';
-  const a = Buffer.from(given);
-  const b = Buffer.from(expected);
-  if (a.length !== b.length || a.length === 0) return false;
-  return crypto.timingSafeEqual(a, b);
+  if (!expected) return { ok: false, via: 'none' };
+  const ip = clientIp(req);
+  const locked = keyLocked(ip);
+  const hasQuery = url.searchParams.has('key');
+  const given = hasQuery ? (url.searchParams.get('key') || '') : readCookie(req, 'intake_key');
+  const ok = keysEqual(given, expected);
+  if (locked || !ok) {
+    noteKeyFail(ip);
+    return { ok: false, via: hasQuery ? 'query' : 'cookie' };
+  }
+  keyFails.delete(ip);
+  return { ok: true, via: hasQuery ? 'query' : 'cookie', key: given };
+}
+
+function privateCookie(req, key) {
+  const secure = req.headers['x-forwarded-proto'] === 'https';
+  const value = Buffer.from(String(key), 'utf8').toString('base64url');
+  const parts = ['intake_key=' + value, 'HttpOnly', 'SameSite=Lax', 'Path=/', 'Max-Age=43200'];
+  if (secure) parts.push('Secure');
+  return parts.join('; ');
+}
+
+function allowSubmitAttempt(ip) {
+  const now = Date.now();
+  const row = submitAttempts.get(ip);
+  if (!row || now - row.start > SUBMIT_WINDOW_MS) {
+    remember(submitAttempts, ip, { count: 1, start: now, last: now });
+    return true;
+  }
+  if (now - row.last < SUBMIT_GAP_MS) return false;
+  if (row.count >= SUBMIT_MAX_ATTEMPTS) return false;
+  row.count += 1;
+  row.last = now;
+  return true;
+}
+
+function enqueueStore(fn) {
+  const run = storeQueue.then(() => fn());
+  storeQueue = run.then(() => undefined, () => undefined);
+  return run;
+}
+
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isStoredFileUrl(pathname) {
+  const candidates = [pathname];
+  try {
+    candidates.push(decodeURIComponent(pathname));
+  } catch (err) {
+    /* keep the raw path */
+  }
+  return candidates.some((value) => {
+    const p = String(value).toLowerCase();
+    return p === '/data' || p.startsWith('/data/')
+      || p === '/uploads' || p.startsWith('/uploads/')
+      || p.endsWith('/submissions.json');
+  });
 }
 
 function send(res, status, body, type) {
@@ -410,14 +629,40 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (isStoredFileUrl(pathname)) {
+      send(res, 404, layout('Not found', '<h1>That page is not here.</h1><p><a href="/">Back to the brief</a></p>'));
+      return;
+    }
+
     if (req.method === 'GET' && (pathname === '/' || pathname === '/index.html')) {
       send(res, 200, fs.readFileSync(FORM_FILE));
       return;
     }
 
     if (req.method === 'POST' && pathname === '/submit') {
-      const parsed = await parseMultipart(req);
-      buildSubmission(parsed);
+      const ip = clientIp(req);
+      if (inflight >= MAX_INFLIGHT) {
+        send(res, 429, layout('Please wait', '<p class="kicker">OZ Leads</p><h1>Please wait a moment and try again.</h1><p><a href="/">Back to the brief</a></p>', true));
+        return;
+      }
+      if (!allowSubmitAttempt(ip)) {
+        send(res, 429, layout('Please wait', '<p class="kicker">OZ Leads</p><h1>Please wait before sending another brief.</h1><p><a href="/">Back to the brief</a></p>', true));
+        return;
+      }
+      const declared = Number(req.headers['content-length'] || 0);
+      if (declared > MAX_BODY) {
+        req.destroy();
+        throw new HttpError(400, 'The upload is too large.');
+      }
+      inflight += 1;
+      try {
+        const parsed = await parseMultipart(req);
+        await enqueueStore(() => {
+          buildSubmission(parsed, ip);
+        });
+      } finally {
+        inflight -= 1;
+      }
       res.writeHead(303, { Location: '/thanks', 'Cache-Control': 'no-store' });
       res.end();
       return;
@@ -432,9 +677,23 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    if (req.method === 'GET' && (pathname === '/submissions' || pathname.startsWith('/submissions/') || pathname.startsWith('/media/')) && !listAllowed(url)) {
-      send(res, 404, layout('Not found', '<h1>That page is not here.</h1><p><a href="/">Back to the brief</a></p>'));
-      return;
+    const isPrivate = req.method === 'GET' && (pathname === '/submissions' || pathname.startsWith('/submissions/') || pathname.startsWith('/media/'));
+    if (isPrivate) {
+      const auth = authorize(req, url);
+      if (!auth.ok) {
+        await wait(KEY_FAIL_DELAY_MS);
+        send(res, 404, layout('Not found', '<h1>That page is not here.</h1><p><a href="/">Back to the brief</a></p>'));
+        return;
+      }
+      if (auth.via === 'query') {
+        res.writeHead(302, {
+          Location: pathname,
+          'Set-Cookie': privateCookie(req, auth.key),
+          'Cache-Control': 'no-store'
+        });
+        res.end();
+        return;
+      }
     }
 
     if (req.method === 'GET' && pathname === '/submissions') {
@@ -443,7 +702,7 @@ const server = http.createServer(async (req, res) => {
       send(res, 200, layout('Submissions · OZ Leads', `
         <p class="kicker">Private</p>
         <h1>Submissions</h1>
-        <p class="muted">Unlisted list for the owner. It is not linked from the public form. No login. ${db.submissions.length} saved in data/submissions.json.</p>
+        <p class="muted">Unlisted list for the owner. It is not linked from the public form. No login. ${db.submissions.length} saved.</p>
         ${items || '<p class="empty">No briefs yet.</p>'}
       `, true));
       return;
@@ -475,7 +734,7 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       const filePath = path.join(UPLOAD_ROOT, sub.id, storedName);
-      if (!filePath.startsWith(UPLOAD_ROOT) || !fs.existsSync(filePath)) {
+      if (!isInside(UPLOAD_ROOT, filePath) || !fs.existsSync(filePath)) {
         send(res, 404, 'Not found', 'text/plain; charset=utf-8');
         return;
       }
@@ -484,7 +743,7 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(200, {
         'Content-Type': type,
         'Content-Length': bytes.length,
-        'Cache-Control': 'private, max-age=3600',
+        'Cache-Control': 'private, no-store',
         'X-Content-Type-Options': 'nosniff'
       });
       res.end(bytes);
@@ -521,6 +780,35 @@ if (process.argv[2] === '--self-test') {
   }
   if (parsed.files.length !== 1 || !parsed.files[0].buffer.equals(png)) throw new Error('file parse failed');
   if (sniff(png) !== '.png') throw new Error('png sniff failed');
+  if (!keysEqual('same-key', 'same-key') || keysEqual('short', 'much-longer-key')) {
+    throw new Error('constant-time compare failed');
+  }
+  const lockIp = '203.0.113.50';
+  for (let i = 0; i < KEY_MAX_FAILS - 1; i += 1) noteKeyFail(lockIp);
+  if (keyLocked(lockIp)) throw new Error('locked too early');
+  noteKeyFail(lockIp);
+  if (!keyLocked(lockIp)) throw new Error('failed-key lockout missing');
+  if (isInside(ROOT, STORE_ROOT) || isInside(ROOT, DATA_DIR) || isInside(ROOT, UPLOAD_ROOT)) {
+    throw new Error('briefs are stored inside the app folder');
+  }
+  if (!isStoredFileUrl('/data/submissions.json') || !isStoredFileUrl('/uploads/abc/photo.png')) {
+    throw new Error('stored file urls are not blocked');
+  }
+  if (isStoredFileUrl('/submissions') || isStoredFileUrl('/')) throw new Error('public urls were blocked');
+  const many = [Buffer.from(`--${boundary}\r\n`)];
+  for (let i = 0; i < MAX_FILES + 1; i += 1) {
+    many.push(Buffer.from(`Content-Disposition: form-data; name="project_${i}"; filename="p.png"\r\nContent-Type: image/png\r\n\r\n`));
+    many.push(png);
+    many.push(Buffer.from(`\r\n--${boundary}\r\n`));
+  }
+  many.push(Buffer.from(`--\r\n`));
+  let rejected = false;
+  try {
+    splitMultipart(Buffer.concat(many), boundary);
+  } catch (err) {
+    rejected = err instanceof HttpError && err.status === 400 && err.message === 'Too many photos.';
+  }
+  if (!rejected) throw new Error('extra photos were accepted');
   console.log('self-test ok');
   process.exit(0);
 }
