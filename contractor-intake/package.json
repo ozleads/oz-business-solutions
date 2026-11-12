@@ -1,8 +1,14 @@
 {
   "name": "oz-leads-intake",
   "private": true,
-  "description": "Public contractor intake form and private submissions list for OZ Leads.",
+  "description": "Public contractor intake form and a password-protected inbox for OZ Leads.",
   "scripts": {
-    "start": "node server.js"
+    "build": "node scripts/migrate.mjs",
+    "start": "node server.js",
+    "test": "node server.js --self-test"
+  },
+  "dependencies": {
+    "@electric-sql/pglite": "^0.5.16",
+    "pg": "^8.23.1"
   }
 }
