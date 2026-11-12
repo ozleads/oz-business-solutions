@@ -2,9 +2,9 @@
 
 const http = require('http');
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
+const store = require('./store');
 
 const HOST = process.env.PORT ? '0.0.0.0' : '127.0.0.1';
 const PORT = Number(process.env.PORT) || 4173;
@@ -29,28 +29,14 @@ const KEY_WINDOW_MS = 15 * 60 * 1000;
 const KEY_MAX_FAILS = 8;
 const KEY_FAIL_DELAY_MS = 400;
 const MAP_MAX = 500;
-
-function isInside(parent, child) {
-  const base = path.resolve(parent);
-  const target = path.resolve(child);
-  if (target === base) return true;
-  const rel = path.relative(base, target);
-  return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
-}
-
-function resolveStoreRoot() {
-  const fallback = path.join(os.tmpdir(), 'oz-leads-intake');
-  const requested = process.env.INTAKE_STORE_DIR;
-  if (!requested) return fallback;
-  const chosen = path.resolve(requested);
-  if (isInside(ROOT, chosen)) return fallback;
-  return chosen;
-}
-
-const STORE_ROOT = resolveStoreRoot();
-const DATA_DIR = path.join(STORE_ROOT, 'data');
-const DATA_FILE = path.join(DATA_DIR, 'submissions.json');
-const UPLOAD_ROOT = path.join(STORE_ROOT, 'uploads');
+const SESSION_MS = 12 * 60 * 60 * 1000;
+const LOGIN_BODY_MAX = 4096;
+const LIMITS = {
+  maxSubmissions: MAX_SUBMISSIONS,
+  perIp: PER_IP_SUBMISSIONS,
+  perIpBytes: PER_IP_BYTES,
+  maxBytes: MAX_STORE_BYTES
+};
 
 class HttpError extends Error {
   constructor(status, message) {
@@ -59,78 +45,8 @@ class HttpError extends Error {
   }
 }
 
-function ensureStore() {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-  fs.mkdirSync(UPLOAD_ROOT, { recursive: true });
-  if (!fs.existsSync(DATA_FILE)) {
-    fs.writeFileSync(DATA_FILE, JSON.stringify({ submissions: [] }, null, 2));
-  }
-}
-
-function loadDB() {
-  ensureStore();
-  const data = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
-  if (!Array.isArray(data.submissions)) data.submissions = [];
-  return data;
-}
-
-function saveDB(data) {
-  const tmp = DATA_FILE + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
-  fs.renameSync(tmp, DATA_FILE);
-}
-
-function directoryBytes(dir) {
-  const root = path.resolve(dir);
-  if (!fs.existsSync(root)) return 0;
-  let total = 0;
-  const stack = [root];
-  while (stack.length) {
-    const current = stack.pop();
-    if (!isInside(root, current)) continue;
-    let entries = [];
-    try {
-      entries = fs.readdirSync(current, { withFileTypes: true });
-    } catch (err) {
-      continue;
-    }
-    for (const entry of entries) {
-      if (entry.isSymbolicLink()) continue;
-      const child = path.join(current, entry.name);
-      if (entry.isDirectory()) stack.push(child);
-      else if (entry.isFile()) {
-        try {
-          total += fs.statSync(child).size;
-        } catch (err) {
-          continue;
-        }
-      }
-    }
-  }
-  return total;
-}
-
 function hashIp(ip) {
   return crypto.createHash('sha256').update(String(ip)).digest('hex').slice(0, 20);
-}
-
-function assertRoom(imageBytes, ipHash) {
-  const db = loadDB();
-  if (db.submissions.length >= MAX_SUBMISSIONS) {
-    throw new HttpError(429, 'We can\'t take more briefs right now. Please try again later.');
-  }
-  const mine = db.submissions.filter((item) => item.ipHash === ipHash);
-  if (mine.length >= PER_IP_SUBMISSIONS) {
-    throw new HttpError(429, 'Please wait before sending another brief.');
-  }
-  let mineBytes = 0;
-  for (const item of mine) mineBytes += directoryBytes(path.join(UPLOAD_ROOT, item.id));
-  if (mineBytes + imageBytes > PER_IP_BYTES) {
-    throw new HttpError(429, 'Please wait before sending more photos.');
-  }
-  if (directoryBytes(UPLOAD_ROOT) + imageBytes > MAX_STORE_BYTES) {
-    throw new HttpError(429, 'We can\'t take more photos right now. Please try again later.');
-  }
 }
 
 function esc(value) {
@@ -214,15 +130,14 @@ function splitMultipart(body, boundary) {
   return { fields, files };
 }
 
-function parseMultipart(req) {
+function readChunks(req, limit) {
   return new Promise((resolve, reject) => {
-    const header = req.headers['content-type'] || '';
-    const match = header.match(/boundary=(?:"([^"]+)"|([^;]+))/i);
-    if (!match) {
-      reject(new HttpError(400, 'Submit the form from the brief page.'));
+    const declared = Number(req.headers['content-length'] || 0);
+    if (declared > limit) {
+      reject(new HttpError(400, 'The upload is too large.'));
+      req.destroy();
       return;
     }
-    const boundary = (match[1] || match[2] || '').trim();
     const chunks = [];
     let size = 0;
     let failed = false;
@@ -237,7 +152,7 @@ function parseMultipart(req) {
     req.on('data', (chunk) => {
       if (failed) return;
       size += chunk.length;
-      if (size > MAX_BODY) {
+      if (size > limit) {
         fail(new HttpError(400, 'The upload is too large.'));
         return;
       }
@@ -246,13 +161,17 @@ function parseMultipart(req) {
     req.on('error', fail);
     req.on('end', () => {
       if (failed) return;
-      try {
-        resolve(splitMultipart(Buffer.concat(chunks), boundary));
-      } catch (err) {
-        reject(err instanceof HttpError ? err : new HttpError(400, 'The upload could not be read.'));
-      }
+      resolve(Buffer.concat(chunks));
     });
   });
+}
+
+function parseMultipart(req) {
+  const header = req.headers['content-type'] || '';
+  const match = header.match(/boundary=(?:"([^"]+)"|([^;]+))/i);
+  if (!match) return Promise.reject(new HttpError(400, 'Submit the form from the brief page.'));
+  const boundary = (match[1] || match[2] || '').trim();
+  return readChunks(req, MAX_BODY).then((body) => splitMultipart(body, boundary));
 }
 
 function field(fields, key) {
@@ -269,14 +188,21 @@ function takeImage(fileMap, key, label) {
   return { buffer: file.buffer, ext, originalName: path.basename(file.filename).slice(0, 180) };
 }
 
-function writeImage(dir, image) {
+function rememberImage(image, files, extra) {
+  if (!image) return null;
   const storedName = crypto.randomBytes(8).toString('hex') + image.ext;
-  fs.writeFileSync(path.join(dir, storedName), image.buffer);
-  return { storedName, originalName: image.originalName };
+  files.push({ storedName, bytes: image.buffer });
+  return Object.assign({ storedName, originalName: image.originalName }, extra || {});
 }
 
-function buildSubmission(parsed, ip) {
-  const { fields, files } = parsed;
+function roomError(reason) {
+  if (reason === 'ip') throw new HttpError(429, 'Please wait before sending another brief.');
+  if (reason === 'ip-bytes') throw new HttpError(429, 'Please wait before sending more photos.');
+  throw new HttpError(429, 'We can\'t take more briefs right now. Please try again later.');
+}
+
+async function buildSubmission(parsed, ip) {
+  const { fields, files: uploads } = parsed;
   const businessName = field(fields, 'businessName');
   const phone = field(fields, 'phone');
   const city = field(fields, 'city');
@@ -285,7 +211,7 @@ function buildSubmission(parsed, ip) {
   }
 
   const fileMap = new Map();
-  for (const file of files) fileMap.set(file.field, file);
+  for (const file of uploads) fileMap.set(file.field, file);
 
   const logo = takeImage(fileMap, 'logo', 'The logo');
   const team = takeImage(fileMap, 'teamPhoto', 'The team photo');
@@ -313,23 +239,12 @@ function buildSubmission(parsed, ip) {
     if (name || quote) reviews.push({ name, quote });
   }
 
-  let imageBytes = 0;
-  if (logo) imageBytes += logo.buffer.length;
-  if (team) imageBytes += team.buffer.length;
-  for (const project of projects) imageBytes += project.image.buffer.length;
-  const ipHash = hashIp(ip || '');
-  assertRoom(imageBytes, ipHash);
-
-  const id = Date.now().toString(36) + crypto.randomBytes(4).toString('hex');
-  const dir = path.join(UPLOAD_ROOT, id);
-  if (!isInside(UPLOAD_ROOT, dir)) throw new HttpError(400, 'The upload could not be saved.');
-  fs.mkdirSync(dir, { recursive: true });
-
+  const storedFiles = [];
   const submission = {
-    id,
+    id: Date.now().toString(36) + crypto.randomBytes(4).toString('hex'),
     createdAt: new Date().toISOString(),
     sample: false,
-    ipHash,
+    ipHash: hashIp(ip || ''),
     businessName,
     phone,
     city,
@@ -354,17 +269,13 @@ function buildSubmission(parsed, ip) {
     },
     mainButton: field(fields, 'mainButton'),
     notes: field(fields, 'notes'),
-    logo: logo ? writeImage(dir, logo) : null,
-    teamPhoto: team ? writeImage(dir, team) : null,
-    projects: projects.map((project) => ({
-      ...writeImage(dir, project.image),
-      caption: project.caption
-    }))
+    logo: rememberImage(logo, storedFiles),
+    teamPhoto: rememberImage(team, storedFiles),
+    projects: projects.map((project) => rememberImage(project.image, storedFiles, { caption: project.caption }))
   };
 
-  const db = loadDB();
-  db.submissions.push(submission);
-  saveDB(db);
+  const saved = await store.saveSubmission(submission, storedFiles, LIMITS);
+  if (!saved.ok) roomError(saved.reason);
   return submission;
 }
 
@@ -385,12 +296,14 @@ function layout(title, body, robots) {
     .kicker { margin:0; font:600 11px/1 system-ui,sans-serif; letter-spacing:.2em; text-transform:uppercase; color:var(--brass); }
     h1 { font-weight:500; font-size:2.4rem; line-height:1.05; margin:.5rem 0 .4rem; }
     h2 { font-weight:500; font-size:1.45rem; margin:0; }
+    h3 { font-weight:500; font-size:1.05rem; margin:1.1rem 0 .2rem; }
     .muted, .meta { color:var(--muted); font:14px/1.45 system-ui,sans-serif; }
+    .warn { color:#8a3a2a; }
     article { border-top:1px solid var(--line); padding:1.2rem 0 1.4rem; }
     .badge { display:inline-block; margin-left:.5rem; padding:.15rem .4rem; border:1px solid var(--brass); color:var(--brass); font:600 10px/1.4 system-ui,sans-serif; letter-spacing:.12em; text-transform:uppercase; vertical-align:middle; }
     dl { display:grid; grid-template-columns:8.5rem 1fr; gap:.35rem .8rem; margin:1rem 0; }
     dt { color:var(--muted); font:12px/1.4 system-ui,sans-serif; letter-spacing:.04em; text-transform:uppercase; }
-    dd { margin:0; }
+    dd { margin:0; overflow-wrap:anywhere; }
     ul { margin:.4rem 0 0; padding-left:1.1rem; }
     blockquote { margin:.7rem 0; padding-left:.8rem; border-left:2px solid var(--brass); }
     img.logo { width:88px; height:88px; object-fit:cover; background:var(--field); border:1px solid var(--line); }
@@ -399,6 +312,11 @@ function layout(title, body, robots) {
     figure img { width:220px; height:150px; object-fit:cover; background:var(--field); border:1px solid var(--line); }
     figcaption { color:var(--muted); font:13px/1.35 system-ui,sans-serif; margin-top:.3rem; }
     .empty { color:var(--muted); }
+    label { display:block; margin:.9rem 0 0; font:13px/1.3 system-ui,sans-serif; }
+    input { display:block; width:100%; max-width:22rem; margin-top:.35rem; padding:.7rem .75rem; border:1px solid var(--line); background:var(--field); color:var(--ink); font:16px/1.4 system-ui,sans-serif; }
+    button { margin-top:1rem; border:0; background:var(--ink); color:var(--paper); padding:.8rem 1.1rem; font:13px/1 system-ui,sans-serif; letter-spacing:.08em; text-transform:uppercase; cursor:pointer; }
+    form.out { margin:1rem 0 0; }
+    form.out button { background:transparent; color:var(--ink); border:1px solid var(--line); }
   </style>
 </head>
 <body>
@@ -413,6 +331,14 @@ function row(label, value) {
   return `<dt>${esc(label)}</dt><dd>${textBlock(trimmed)}</dd>`;
 }
 
+function linkOrText(value) {
+  const trimmed = String(value ?? '').trim();
+  if (/^https?:\/\/[^\s<>"]+$/i.test(trimmed)) {
+    return `<a href="${esc(trimmed)}" rel="noopener noreferrer">${esc(trimmed)}</a>`;
+  }
+  return esc(trimmed);
+}
+
 function fileKnown(sub, name) {
   const names = [];
   if (sub.logo) names.push(sub.logo.storedName);
@@ -422,29 +348,30 @@ function fileKnown(sub, name) {
 }
 
 function renderSubmission(sub) {
-  const when = new Date(sub.createdAt);
-  const stamp = Number.isNaN(when.getTime())
-    ? ''
-    : new Intl.DateTimeFormat('en-US', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'UTC' }).format(when) + ' UTC';
+  const stamp = stampOf(sub.createdAt);
   const sample = sub.sample ? '<span class="badge">Sample</span>' : '';
   const services = (sub.services || [])
-    .map((service) => `<li><strong>${esc(service.name || 'Service')}</strong> — ${esc(service.sentence || '')}</li>`)
+    .map((service) => {
+      const sentence = String(service.sentence || '').trim();
+      const name = esc(service.name || 'Service');
+      return `<li><strong>${name}</strong>${sentence ? ' — ' + esc(sentence) : ''}</li>`;
+    })
     .join('');
   const reviews = (sub.reviews || [])
     .map((review) => `<blockquote><p>${textBlock(review.quote)}</p><p class="muted">${esc(review.name)}</p></blockquote>`)
     .join('');
   const social = Object.entries(sub.social || {})
     .filter(([, value]) => String(value || '').trim())
-    .map(([key, value]) => `<li>${esc(key)}: ${esc(value)}</li>`)
+    .map(([key, value]) => `<li>${esc(key)}: ${linkOrText(value)}</li>`)
     .join('');
   const logo = sub.logo
-    ? `<img class="logo" src="/media/${esc(sub.id)}/${esc(sub.logo.storedName)}" alt="Logo">`
+    ? `<p><img class="logo" src="/media/${esc(sub.id)}/${esc(sub.logo.storedName)}" alt="Logo" loading="lazy"></p>`
     : '';
   const team = sub.teamPhoto
-    ? `<figure><img src="/media/${esc(sub.id)}/${esc(sub.teamPhoto.storedName)}" alt="Team photo"><figcaption>Team</figcaption></figure>`
+    ? `<figure><img src="/media/${esc(sub.id)}/${esc(sub.teamPhoto.storedName)}" alt="Team photo" loading="lazy"><figcaption>Team</figcaption></figure>`
     : '';
   const projects = (sub.projects || [])
-    .map((project) => `<figure><img src="/media/${esc(sub.id)}/${esc(project.storedName)}" alt="${esc(project.caption || 'Project photo')}"><figcaption>${esc(project.caption || project.originalName || 'Project photo')}</figcaption></figure>`)
+    .map((project) => `<figure><a href="/media/${esc(sub.id)}/${esc(project.storedName)}"><img src="/media/${esc(sub.id)}/${esc(project.storedName)}" alt="${esc(project.caption || 'Project photo')}" loading="lazy"></a><figcaption>${esc(project.caption || project.originalName || 'Project photo')}</figcaption></figure>`)
     .join('');
   const facts = [
     row('Phone', sub.phone),
@@ -452,7 +379,7 @@ function renderSubmission(sub) {
     row('Email', sub.email),
     row('Street', sub.street),
     row('Hours', sub.hours),
-    row('Service area', sub.serviceArea),
+    row('Area', sub.serviceArea),
     row('Tagline', sub.tagline),
     row('About', sub.about),
     row('Years', sub.years),
@@ -469,10 +396,44 @@ function renderSubmission(sub) {
     <dl>${facts}</dl>
     ${services ? `<h3>Services</h3><ul>${services}</ul>` : ''}
     ${reviews ? `<h3>Reviews</h3>${reviews}` : ''}
-    ${social ? `<h3>Social</h3><ul>${social}</ul>` : ''}
-    ${(team || projects) ? `<h3>Photos</h3><div class="shots">${team}${projects}</div>` : ''}
-    <p class="meta"><a href="/submissions/${esc(sub.id)}">Open this submission</a></p>
+    ${social ? `<h3>Links</h3><ul>${social}</ul>` : ''}
+    ${(team || projects) ? `<h3>Photos</h3><div class="shots">${team}${projects}</div>` : '<p class="empty">No photos on this brief.</p>'}
+    <p class="meta"><a href="/submissions/${esc(sub.id)}">Open this brief</a></p>
   </article>`;
+}
+
+function stampOf(iso) {
+  const when = new Date(iso);
+  if (Number.isNaN(when.getTime())) return '';
+  return new Intl.DateTimeFormat('en-US', {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+    timeZone: 'America/New_York'
+  }).format(when) + ' ET';
+}
+
+function passwordPage(message) {
+  const note = message ? `<p class="warn">${esc(message)}</p>` : '';
+  return layout('Inbox · OZ Leads', `
+    <p class="kicker">Private</p>
+    <h1>Inbox</h1>
+    <p class="muted">Briefs and photos from the website form show up here. This page is not linked from the public form.</p>
+    ${note}
+    <form method="post" action="/inbox" autocomplete="off">
+      <label>Password
+        <input type="password" name="password" autocomplete="current-password" required maxlength="200">
+      </label>
+      <button type="submit">Open inbox</button>
+    </form>
+  `, true);
+}
+
+function closedPage() {
+  return layout('Inbox · OZ Leads', `
+    <p class="kicker">Private</p>
+    <h1>Inbox</h1>
+    <p>This inbox is not open yet. The password has not been saved.</p>
+  `, true);
 }
 
 const keyFails = new Map();
@@ -511,19 +472,63 @@ function noteKeyFail(ip) {
   if (row.count < KEY_MAX_FAILS) row.count += 1;
 }
 
-function readCookie(req, name) {
+function readCookieValue(req, name) {
   const header = req.headers.cookie || '';
   for (const part of header.split(';')) {
     const eq = part.indexOf('=');
     if (eq === -1) continue;
     if (part.slice(0, eq).trim() !== name) continue;
-    try {
-      return Buffer.from(part.slice(eq + 1).trim(), 'base64url').toString('utf8');
-    } catch (err) {
-      return '';
-    }
+    return part.slice(eq + 1).trim();
   }
   return '';
+}
+
+function listKey() {
+  return String(process.env.INTAKE_LIST_KEY || '');
+}
+
+function issueSession(secret) {
+  const exp = String(Date.now() + SESSION_MS);
+  const mac = crypto.createHmac('sha256', secret).update('oz-leads-inbox-v1:' + exp).digest('base64url');
+  return exp + '.' + mac;
+}
+
+function sessionValid(secret, token) {
+  if (!secret || !token || token.length > 200) return false;
+  const dot = token.indexOf('.');
+  if (dot <= 0) return false;
+  const expText = token.slice(0, dot);
+  const mac = token.slice(dot + 1);
+  if (!/^\d{10,16}$/.test(expText)) return false;
+  const exp = Number(expText);
+  const now = Date.now();
+  if (!Number.isFinite(exp) || exp < now || exp > now + SESSION_MS + 60000) return false;
+  return keysEqual(mac, crypto.createHmac('sha256', secret).update('oz-leads-inbox-v1:' + expText).digest('base64url'));
+}
+
+function authorize(req) {
+  const expected = listKey();
+  if (!expected) return { ok: false, reason: 'unset' };
+  if (keyLocked(clientIp(req))) return { ok: false, reason: 'locked' };
+  if (!sessionValid(expected, readCookieValue(req, 'intake_session'))) return { ok: false, reason: 'missing' };
+  return { ok: true };
+}
+
+function cookieParts(req, value, maxAge) {
+  const host = String(req.headers.host || '');
+  const local = host.startsWith('127.0.0.1') || host.startsWith('localhost') || host.startsWith('[::1]');
+  const secure = req.headers['x-forwarded-proto'] === 'https' || !local;
+  const parts = ['intake_session=' + value, 'HttpOnly', 'SameSite=Lax', 'Path=/', 'Max-Age=' + maxAge];
+  if (secure) parts.push('Secure');
+  return parts.join('; ');
+}
+
+function sessionCookie(req, secret) {
+  return cookieParts(req, issueSession(secret), Math.floor(SESSION_MS / 1000));
+}
+
+function clearCookie(req) {
+  return cookieParts(req, '', 0);
 }
 
 function clientIp(req) {
@@ -533,30 +538,6 @@ function clientIp(req) {
     if (hop) return hop.slice(0, 80);
   }
   return (req.socket && req.socket.remoteAddress) || 'unknown';
-}
-
-function authorize(req, url) {
-  const expected = process.env.INTAKE_LIST_KEY || '';
-  if (!expected) return { ok: false, via: 'none' };
-  const ip = clientIp(req);
-  const locked = keyLocked(ip);
-  const hasQuery = url.searchParams.has('key');
-  const given = hasQuery ? (url.searchParams.get('key') || '') : readCookie(req, 'intake_key');
-  const ok = keysEqual(given, expected);
-  if (locked || !ok) {
-    noteKeyFail(ip);
-    return { ok: false, via: hasQuery ? 'query' : 'cookie' };
-  }
-  keyFails.delete(ip);
-  return { ok: true, via: hasQuery ? 'query' : 'cookie', key: given };
-}
-
-function privateCookie(req, key) {
-  const secure = req.headers['x-forwarded-proto'] === 'https';
-  const value = Buffer.from(String(key), 'utf8').toString('base64url');
-  const parts = ['intake_key=' + value, 'HttpOnly', 'SameSite=Lax', 'Path=/', 'Max-Age=43200'];
-  if (secure) parts.push('Secure');
-  return parts.join('; ');
 }
 
 function allowSubmitAttempt(ip) {
@@ -598,14 +579,16 @@ function isStoredFileUrl(pathname) {
   });
 }
 
-function send(res, status, body, type) {
-  const payload = Buffer.from(body);
-  res.writeHead(status, {
+function send(res, status, body, type, extra) {
+  const payload = Buffer.isBuffer(body) ? body : Buffer.from(body);
+  res.writeHead(status, Object.assign({
     'Content-Type': type || 'text/html; charset=utf-8',
     'Content-Length': payload.length,
     'Cache-Control': 'no-store',
-    'X-Content-Type-Options': 'nosniff'
-  });
+    'Referrer-Policy': 'no-referrer',
+    'X-Content-Type-Options': 'nosniff',
+    'X-Frame-Options': 'DENY'
+  }, extra || {}));
   res.end(payload);
 }
 
@@ -618,13 +601,32 @@ function contentType(fileName) {
   return '';
 }
 
+function redirect(res, location, cookie) {
+  const headers = { Location: location, 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer' };
+  if (cookie) headers['Set-Cookie'] = cookie;
+  res.writeHead(303, headers);
+  res.end();
+}
+
+async function showInbox(res) {
+  const items = await store.listSubmissions();
+  const cards = items.map(renderSubmission).join('');
+  send(res, 200, layout('Inbox · OZ Leads', `
+    <p class="kicker">Private</p>
+    <h1>Inbox</h1>
+    <p class="muted">${items.length} saved. Photos stay on this page.</p>
+    <form class="out" method="post" action="/inbox/logout"><button type="submit">Sign out</button></form>
+    ${cards || '<p class="empty">No briefs yet. They show up here after someone sends the form.</p>'}
+  `, true));
+}
+
 const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url || '/', `http://${HOST}:${PORT}`);
     const pathname = url.pathname;
 
     if (pathname === '/favicon.ico') {
-      res.writeHead(204);
+      res.writeHead(204, { 'Cache-Control': 'no-store' });
       res.end();
       return;
     }
@@ -649,22 +651,14 @@ const server = http.createServer(async (req, res) => {
         send(res, 429, layout('Please wait', '<p class="kicker">OZ Leads</p><h1>Please wait before sending another brief.</h1><p><a href="/">Back to the brief</a></p>', true));
         return;
       }
-      const declared = Number(req.headers['content-length'] || 0);
-      if (declared > MAX_BODY) {
-        req.destroy();
-        throw new HttpError(400, 'The upload is too large.');
-      }
       inflight += 1;
       try {
         const parsed = await parseMultipart(req);
-        await enqueueStore(() => {
-          buildSubmission(parsed, ip);
-        });
+        await enqueueStore(() => buildSubmission(parsed, ip));
       } finally {
         inflight -= 1;
       }
-      res.writeHead(303, { Location: '/thanks', 'Cache-Control': 'no-store' });
-      res.end();
+      redirect(res, '/thanks');
       return;
     }
 
@@ -677,48 +671,87 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    const isPrivate = req.method === 'GET' && (pathname === '/submissions' || pathname.startsWith('/submissions/') || pathname.startsWith('/media/'));
-    if (isPrivate) {
-      const auth = authorize(req, url);
-      if (!auth.ok) {
+    if (req.method === 'POST' && pathname === '/inbox') {
+      const expected = listKey();
+      const ip = clientIp(req);
+      if (!expected) {
+        send(res, 200, closedPage());
+        return;
+      }
+      if (keyLocked(ip)) {
         await wait(KEY_FAIL_DELAY_MS);
-        send(res, 404, layout('Not found', '<h1>That page is not here.</h1><p><a href="/">Back to the brief</a></p>'));
+        send(res, 429, layout('Inbox · OZ Leads', `
+          <p class="kicker">Private</p>
+          <h1>Inbox</h1>
+          <p class="warn">Too many tries. Wait 15 minutes, then try again.</p>
+        `, true));
         return;
       }
-      if (auth.via === 'query') {
-        res.writeHead(302, {
-          Location: pathname,
-          'Set-Cookie': privateCookie(req, auth.key),
-          'Cache-Control': 'no-store'
-        });
-        res.end();
+      const type = String(req.headers['content-type'] || '');
+      if (!type.includes('application/x-www-form-urlencoded')) {
+        throw new HttpError(400, 'Use the password form on this page.');
+      }
+      const body = await readChunks(req, LOGIN_BODY_MAX);
+      const given = new URLSearchParams(body.toString('utf8')).get('password') || '';
+      if (!given || given.length > 200 || !keysEqual(given, expected)) {
+        noteKeyFail(ip);
+        await wait(KEY_FAIL_DELAY_MS);
+        const locked = keyLocked(ip);
+        send(res, locked ? 429 : 200, locked
+          ? layout('Inbox · OZ Leads', '<p class="kicker">Private</p><h1>Inbox</h1><p class="warn">Too many tries. Wait 15 minutes, then try again.</p>', true)
+          : passwordPage('That password is wrong.'));
         return;
       }
+      keyFails.delete(ip);
+      redirect(res, '/inbox', sessionCookie(req, expected));
+      return;
+    }
+
+    if (req.method === 'POST' && pathname === '/inbox/logout') {
+      if (!authorize(req).ok) {
+        redirect(res, '/inbox');
+        return;
+      }
+      redirect(res, '/inbox', clearCookie(req));
+      return;
+    }
+
+    if (req.method === 'GET' && pathname === '/inbox') {
+      const auth = authorize(req);
+      if (!auth.ok) {
+        if (auth.reason === 'unset') send(res, 200, closedPage());
+        else if (auth.reason === 'locked') {
+          send(res, 429, layout('Inbox · OZ Leads', `
+            <p class="kicker">Private</p>
+            <h1>Inbox</h1>
+            <p class="warn">Too many tries. Wait 15 minutes, then try again.</p>
+          `, true));
+        } else send(res, 200, passwordPage(''));
+        return;
+      }
+      await showInbox(res);
+      return;
     }
 
     if (req.method === 'GET' && pathname === '/submissions') {
-      const db = loadDB();
-      const items = db.submissions.slice().reverse().map(renderSubmission).join('');
-      send(res, 200, layout('Submissions · OZ Leads', `
-        <p class="kicker">Private</p>
-        <h1>Submissions</h1>
-        <p class="muted">Unlisted list for the owner. It is not linked from the public form. No login. ${db.submissions.length} saved.</p>
-        ${items || '<p class="empty">No briefs yet.</p>'}
-      `, true));
+      redirect(res, '/inbox');
       return;
     }
 
     const detail = pathname.match(/^\/submissions\/([a-z0-9]+)$/i);
     if (req.method === 'GET' && detail) {
-      const db = loadDB();
-      const sub = db.submissions.find((item) => item.id === detail[1]);
+      if (!authorize(req).ok) {
+        redirect(res, '/inbox');
+        return;
+      }
+      const sub = await store.getSubmission(detail[1]);
       if (!sub) {
-        send(res, 404, layout('Not found', '<p class="kicker">Private</p><h1>No submission with that id.</h1><p><a href="/submissions">Back to the list</a></p>', true));
+        send(res, 404, layout('Not found', '<p class="kicker">Private</p><h1>No brief with that id.</h1><p><a href="/inbox">Back to the inbox</a></p>', true));
         return;
       }
       send(res, 200, layout(sub.businessName + ' · OZ Leads', `
         <p class="kicker">Private</p>
-        <p class="muted"><a href="/submissions">All submissions</a></p>
+        <p class="muted"><a href="/inbox">All briefs</a></p>
         ${renderSubmission(sub)}
       `, true));
       return;
@@ -726,27 +759,23 @@ const server = http.createServer(async (req, res) => {
 
     const media = pathname.match(/^\/media\/([a-z0-9]+)\/([a-z0-9]+\.(?:png|jpg|jpeg|webp|gif))$/i);
     if (req.method === 'GET' && media) {
-      const db = loadDB();
-      const sub = db.submissions.find((item) => item.id === media[1]);
+      if (!authorize(req).ok) {
+        send(res, 404, 'Not found', 'text/plain; charset=utf-8');
+        return;
+      }
+      const sub = await store.getSubmission(media[1]);
       const storedName = media[2];
       if (!sub || !fileKnown(sub, storedName)) {
         send(res, 404, 'Not found', 'text/plain; charset=utf-8');
         return;
       }
-      const filePath = path.join(UPLOAD_ROOT, sub.id, storedName);
-      if (!isInside(UPLOAD_ROOT, filePath) || !fs.existsSync(filePath)) {
+      const bytes = await store.readFile(sub.id, storedName);
+      const type = contentType(storedName);
+      if (!bytes || !type) {
         send(res, 404, 'Not found', 'text/plain; charset=utf-8');
         return;
       }
-      const bytes = fs.readFileSync(filePath);
-      const type = contentType(storedName);
-      res.writeHead(200, {
-        'Content-Type': type,
-        'Content-Length': bytes.length,
-        'Cache-Control': 'private, no-store',
-        'X-Content-Type-Options': 'nosniff'
-      });
-      res.end(bytes);
+      send(res, 200, bytes, type, { 'Cache-Control': 'private, no-store' });
       return;
     }
 
@@ -754,12 +783,16 @@ const server = http.createServer(async (req, res) => {
   } catch (err) {
     const status = err.status || 500;
     const message = status === 500 ? 'Something went wrong while saving the brief.' : err.message;
-    if (status === 500) console.error(err);
-    send(res, status, layout('Could not save', `<p class="kicker">OZ Leads</p><h1>${esc(message)}</h1><p><a href="/">Back to the brief</a></p>`, true));
+    if (status === 500) console.error('Intake request failed');
+    if (!res.headersSent) {
+      send(res, status, layout('Could not save', `<p class="kicker">OZ Leads</p><h1>${esc(message)}</h1><p><a href="/">Back to the brief</a></p>`, true));
+    } else {
+      res.end();
+    }
   }
 });
 
-if (process.argv[2] === '--self-test') {
+async function runSelfTest() {
   const boundary = '----testbound';
   const png = Buffer.from(
     'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==',
@@ -767,6 +800,8 @@ if (process.argv[2] === '--self-test') {
   );
   const chunks = [
     Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="businessName"\r\n\r\nAcme Roofing\r\n`),
+    Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="phone"\r\n\r\n555-0100\r\n`),
+    Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="city"\r\n\r\nAustin\r\n`),
     Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="serviceName"\r\n\r\nRoofing\r\n`),
     Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="serviceName"\r\n\r\nSiding\r\n`),
     Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="logo"; filename="logo.png"\r\nContent-Type: image/png\r\n\r\n`),
@@ -776,7 +811,7 @@ if (process.argv[2] === '--self-test') {
   const parsed = splitMultipart(Buffer.concat(chunks), boundary);
   if (parsed.fields.businessName !== 'Acme Roofing') throw new Error('field parse failed');
   if (!Array.isArray(parsed.fields.serviceName) || parsed.fields.serviceName.join('|') !== 'Roofing|Siding') {
-    throw new Error('multi field parse failed: ' + JSON.stringify(parsed.fields));
+    throw new Error('multi field parse failed');
   }
   if (parsed.files.length !== 1 || !parsed.files[0].buffer.equals(png)) throw new Error('file parse failed');
   if (sniff(png) !== '.png') throw new Error('png sniff failed');
@@ -788,13 +823,17 @@ if (process.argv[2] === '--self-test') {
   if (keyLocked(lockIp)) throw new Error('locked too early');
   noteKeyFail(lockIp);
   if (!keyLocked(lockIp)) throw new Error('failed-key lockout missing');
-  if (isInside(ROOT, STORE_ROOT) || isInside(ROOT, DATA_DIR) || isInside(ROOT, UPLOAD_ROOT)) {
-    throw new Error('briefs are stored inside the app folder');
+  const token = issueSession('correct horse');
+  if (token.includes('correct') || token.includes('horse')) throw new Error('session kept the password');
+  if (!sessionValid('correct horse', token) || sessionValid('other secret', token)) {
+    throw new Error('session check failed');
+  }
+  if (isStoredFileUrl('/submissions') || isStoredFileUrl('/') || isStoredFileUrl('/inbox')) {
+    throw new Error('public urls were blocked');
   }
   if (!isStoredFileUrl('/data/submissions.json') || !isStoredFileUrl('/uploads/abc/photo.png')) {
     throw new Error('stored file urls are not blocked');
   }
-  if (isStoredFileUrl('/submissions') || isStoredFileUrl('/')) throw new Error('public urls were blocked');
   const many = [Buffer.from(`--${boundary}\r\n`)];
   for (let i = 0; i < MAX_FILES + 1; i += 1) {
     many.push(Buffer.from(`Content-Disposition: form-data; name="project_${i}"; filename="p.png"\r\nContent-Type: image/png\r\n\r\n`));
@@ -809,11 +848,42 @@ if (process.argv[2] === '--self-test') {
     rejected = err instanceof HttpError && err.status === 400 && err.message === 'Too many photos.';
   }
   if (!rejected) throw new Error('extra photos were accepted');
-  console.log('self-test ok');
-  process.exit(0);
+
+  await store.initStore({ local: true });
+  const saved = await buildSubmission(parsed, '198.51.100.20');
+  const listed = await store.listSubmissions();
+  if (!listed.length || listed[0].id !== saved.id || listed[0].businessName !== 'Acme Roofing') {
+    throw new Error('saved brief did not list');
+  }
+  const photo = await store.readFile(saved.id, saved.logo.storedName);
+  if (!photo || !photo.equals(png)) throw new Error('saved photo did not match');
+  const blocked = await store.saveSubmission(
+    { id: 'secondbrief0001', createdAt: new Date().toISOString(), ipHash: 'x', businessName: 'B' },
+    [],
+    { maxSubmissions: 1, perIp: 3, perIpBytes: 10, maxBytes: 10 }
+  );
+  if (blocked.ok || blocked.reason !== 'full') throw new Error('submission cap failed');
+  const page = renderSubmission(saved);
+  if (page.includes('<script') || !page.includes('Acme Roofing') || !page.includes('/media/')) {
+    throw new Error('inbox render failed');
+  }
 }
 
-ensureStore();
-server.listen(PORT, HOST, () => {
-  console.log(`Intake listening on http://${HOST}:${PORT}`);
-});
+if (process.argv[2] === '--self-test') {
+  runSelfTest().then(() => {
+    console.log('self-test ok');
+    process.exit(0);
+  }).catch((err) => {
+    console.error(err && err.message ? err.message : 'self-test failed');
+    process.exit(1);
+  });
+} else {
+  store.initStore().then(() => {
+    server.listen(PORT, HOST, () => {
+      console.log(`Intake listening on http://${HOST}:${PORT}`);
+    });
+  }).catch(() => {
+    console.error('Intake store failed to open');
+    process.exit(1);
+  });
+}
