@@ -20,7 +20,7 @@
       color: var(--ink);
       font: 17px/1.5 Georgia, "Iowan Old Style", Palatino, serif;
     }
-    .wrap { max-width: 40rem; margin: 0 auto; padding: 2.25rem 1.2rem 4rem; }
+    .wrap { max-width: 28rem; margin: 0 auto; padding: 2.5rem 1.2rem 4rem; }
     .kicker {
       margin: 0;
       font: 600 11px/1 system-ui, sans-serif;
@@ -29,12 +29,9 @@
       color: var(--brass);
     }
     h1 { font-weight: 500; font-size: 2.5rem; line-height: 1.05; margin: .55rem 0 .4rem; }
-    h2 { font-weight: 500; font-size: 1.55rem; margin: 0 0 .35rem; }
-    .lede, .hint { color: var(--muted); margin: 0 0 1rem; }
-    .hint { font: 14px/1.45 system-ui, sans-serif; }
-    section { border-top: 1px solid var(--line); margin-top: 1.6rem; padding-top: 1.2rem; }
+    .lede { color: var(--muted); margin: 0 0 1.4rem; }
     label { display: block; margin: .85rem 0 0; font: 13px/1.3 system-ui, sans-serif; }
-    input, textarea {
+    input {
       display: block;
       width: 100%;
       margin-top: .35rem;
@@ -44,25 +41,10 @@
       color: var(--ink);
       font: 16px/1.4 system-ui, sans-serif;
     }
-    textarea { min-height: 7rem; resize: vertical; }
     .req::after { content: " *"; color: var(--brass); }
-    .two { display: grid; gap: 0 .8rem; }
-    @media (min-width: 700px) { .two { grid-template-columns: 1fr 1fr; } }
-    .choices { display: flex; flex-wrap: wrap; gap: .4rem 1rem; margin-top: .4rem; }
-    label.choice { margin: 0; font-size: 15px; display: flex; align-items: center; gap: .4rem; }
-    label.choice input { width: auto; margin: 0; }
-    .service-row, .pair, .review {
-      display: grid;
-      gap: .4rem .7rem;
-      margin-top: .7rem;
-      padding-top: .7rem;
-      border-top: 1px solid var(--line);
-    }
-    @media (min-width: 700px) {
-      .service-row, .pair { grid-template-columns: 1fr 1fr; }
-    }
+    label span { font: inherit; }
     button {
-      margin-top: .9rem;
+      margin-top: 1.4rem;
       border: 0;
       background: var(--ink);
       color: var(--paper);
@@ -72,9 +54,6 @@
       text-transform: uppercase;
       cursor: pointer;
     }
-    button.ghost { background: transparent; color: var(--ink); border: 1px solid var(--line); }
-    button.primary { width: 100%; margin-top: 1.4rem; }
-    @media (min-width: 700px) { button.primary { width: auto; } }
     .foot { margin-top: 1rem; color: var(--muted); font: 13px/1.4 system-ui, sans-serif; }
   </style>
 </head>
@@ -82,215 +61,24 @@
   <main class="wrap">
     <p class="kicker">OZ Leads</p>
     <h1>Website brief</h1>
-    <p class="lede">Tell us about the business. We use this to build the site preview. The look is chosen later. Only the business name, phone, and city are required.</p>
+    <p class="lede">Name, phone, and city. That's enough. We'll find the rest.</p>
 
     <form action="/submit" method="post" enctype="multipart/form-data">
-      <section>
-        <h2>The business</h2>
-        <div class="two">
-          <label class="req">Business name
-            <input name="businessName" required maxlength="200" autocomplete="organization" placeholder="Harbor &amp; Pine Remodeling">
-          </label>
-          <label class="req">Phone
-            <input name="phone" type="tel" required maxlength="40" autocomplete="tel" placeholder="(555) 010-0148">
-          </label>
-          <label class="req">City
-            <input name="city" required maxlength="80" autocomplete="address-level2" placeholder="Austin">
-          </label>
-          <label>Email
-            <input name="email" type="email" maxlength="200" autocomplete="email" placeholder="hello@example.com">
-          </label>
-        </div>
-        <label>Street address
-          <input name="street" maxlength="200" autocomplete="street-address" placeholder="120 West Main Street">
-        </label>
-        <label>Hours
-          <textarea name="hours" maxlength="500" placeholder="Mon–Fri 7am–5pm, Sat 8am–12pm"></textarea>
-        </label>
-      </section>
-
-      <section>
-        <h2>Where you work</h2>
-        <label>Service area
-          <input name="serviceArea" maxlength="300" placeholder="Cities, or a radius such as 30 miles around Austin">
-        </label>
-      </section>
-
-      <section>
-        <h2>The story</h2>
-        <label>One-line tagline
-          <input name="tagline" maxlength="160" placeholder="Careful remodels, finished on the day we promised.">
-        </label>
-        <label>Short about
-          <textarea name="about" maxlength="4000" placeholder="A few sentences on how you work and who you work for."></textarea>
-        </label>
-        <div class="two">
-          <label>Years in business
-            <input name="years" maxlength="40" inputmode="numeric" placeholder="18">
-          </label>
-          <label>License
-            <input name="license" maxlength="80" placeholder="License number, if you have one">
-          </label>
-        </div>
-        <label>Insured</label>
-        <div class="choices">
-          <label class="choice"><input type="radio" name="insured" value="yes"> Yes</label>
-          <label class="choice"><input type="radio" name="insured" value="no"> No</label>
-          <label class="choice"><input type="radio" name="insured" value="unknown"> Not sure</label>
-        </div>
-      </section>
-
-      <section id="services">
-        <h2>Services</h2>
-        <p class="hint">Each service needs a name and one sentence. Add as many as you offer.</p>
-        <div id="service-list">
-          <div class="service-row">
-            <label>Service name
-              <input name="serviceName" maxlength="120" placeholder="Kitchen remodels">
-            </label>
-            <label>One sentence
-              <input name="serviceSentence" maxlength="280" placeholder="Full gut renovations, from layout to the last fixture.">
-            </label>
-          </div>
-          <div class="service-row">
-            <label>Service name
-              <input name="serviceName" maxlength="120" placeholder="Bathrooms">
-            </label>
-            <label>One sentence
-              <input name="serviceSentence" maxlength="280" placeholder="Tile, plumbing coordination, and a finished room you can use.">
-            </label>
-          </div>
-        </div>
-        <button type="button" class="ghost" id="add-service">Add another service</button>
-      </section>
-
-      <section>
-        <h2>Pictures</h2>
-        <p class="hint">JPG, PNG, WEBP, or GIF. Up to 15 MB each.</p>
-        <label>Logo
-          <input type="file" name="logo" accept="image/jpeg,image/png,image/webp,image/gif">
-        </label>
-        <label>Team photo
-          <input type="file" name="teamPhoto" accept="image/jpeg,image/png,image/webp,image/gif">
-        </label>
-        <div id="photo-list">
-          <div class="pair">
-            <label>Project photo
-              <input type="file" name="project_0" accept="image/jpeg,image/png,image/webp,image/gif">
-            </label>
-            <label>Caption
-              <input type="text" name="caption_0" maxlength="200" placeholder="What is this photo of?">
-            </label>
-          </div>
-          <div class="pair">
-            <label>Project photo
-              <input type="file" name="project_1" accept="image/jpeg,image/png,image/webp,image/gif">
-            </label>
-            <label>Caption
-              <input type="text" name="caption_1" maxlength="200" placeholder="What is this photo of?">
-            </label>
-          </div>
-          <div class="pair">
-            <label>Project photo
-              <input type="file" name="project_2" accept="image/jpeg,image/png,image/webp,image/gif">
-            </label>
-            <label>Caption
-              <input type="text" name="caption_2" maxlength="200" placeholder="What is this photo of?">
-            </label>
-          </div>
-        </div>
-        <button type="button" class="ghost" id="add-photo">Add another photo</button>
-      </section>
-
-      <section id="reviews">
-        <h2>Reviews</h2>
-        <p class="hint">Up to three. A name and a short quote. Leave a row blank if you have fewer.</p>
-        <div class="review">
-          <label>Review 1 name
-            <input name="reviewName1" maxlength="120" placeholder="Client name">
-          </label>
-          <label>Quote
-            <textarea name="reviewQuote1" maxlength="600" placeholder="What they said, in a sentence or two."></textarea>
-          </label>
-        </div>
-        <div class="review">
-          <label>Review 2 name
-            <input name="reviewName2" maxlength="120" placeholder="Client name">
-          </label>
-          <label>Quote
-            <textarea name="reviewQuote2" maxlength="600" placeholder="What they said, in a sentence or two."></textarea>
-          </label>
-        </div>
-        <div class="review">
-          <label>Review 3 name
-            <input name="reviewName3" maxlength="120" placeholder="Client name">
-          </label>
-          <label>Quote
-            <textarea name="reviewQuote3" maxlength="600" placeholder="What they said, in a sentence or two."></textarea>
-          </label>
-        </div>
-      </section>
-
-      <section>
-        <h2>How people reach you</h2>
-        <div class="two">
-          <label>Instagram
-            <input name="instagram" maxlength="300" placeholder="https://instagram.com/…">
-          </label>
-          <label>Facebook
-            <input name="facebook" maxlength="300" placeholder="https://facebook.com/…">
-          </label>
-          <label>Google
-            <input name="google" maxlength="300" placeholder="Google Business link">
-          </label>
-          <label>Website
-            <input name="website" maxlength="300" placeholder="https://">
-          </label>
-          <label>Yelp
-            <input name="yelp" maxlength="300" placeholder="https://yelp.com/…">
-          </label>
-          <label>Other
-            <input name="otherSocial" maxlength="300" placeholder="Any other link">
-          </label>
-        </div>
-        <label>Main button on the site</label>
-        <div class="choices">
-          <label class="choice"><input type="radio" name="mainButton" value="call"> Call</label>
-          <label class="choice"><input type="radio" name="mainButton" value="form"> Form</label>
-          <label class="choice"><input type="radio" name="mainButton" value="both"> Both</label>
-        </div>
-      </section>
-
-      <section>
-        <h2>Anything else</h2>
-        <label>Notes
-          <textarea name="notes" maxlength="4000" placeholder="Colors you like, pages you need, jobs you do not take."></textarea>
-        </label>
-        <button class="primary" type="submit">Send the brief</button>
-        <p class="foot">Photos stay with this brief. We only use them to build your preview.</p>
-      </section>
+      <label><span class="req">Business name</span>
+        <input name="businessName" required maxlength="200" autocomplete="organization" placeholder="Harbor &amp; Pine Remodeling">
+      </label>
+      <label><span class="req">Phone</span>
+        <input name="phone" type="tel" required maxlength="40" autocomplete="tel" placeholder="(555) 010-0148">
+      </label>
+      <label><span class="req">City</span>
+        <input name="city" required maxlength="80" autocomplete="address-level2" placeholder="Austin">
+      </label>
+      <label>Email
+        <input name="email" type="email" maxlength="200" autocomplete="email" placeholder="Optional">
+      </label>
+      <button type="submit">Send</button>
+      <p class="foot">Takes a minute. We'll look up the rest.</p>
     </form>
   </main>
-  <script>
-    document.getElementById('add-service').addEventListener('click', function () {
-      var list = document.getElementById('service-list');
-      var rows = list.querySelectorAll('.service-row');
-      if (rows.length >= 12) return;
-      var row = rows[0].cloneNode(true);
-      row.querySelectorAll('input').forEach(function (input) { input.value = ''; });
-      list.appendChild(row);
-    });
-    var photoCount = 3;
-    document.getElementById('add-photo').addEventListener('click', function () {
-      if (photoCount >= 12) return;
-      var div = document.createElement('div');
-      div.className = 'pair';
-      div.innerHTML =
-        '<label>Project photo<input type="file" name="project_' + photoCount + '" accept="image/jpeg,image/png,image/webp,image/gif"></label>' +
-        '<label>Caption<input type="text" name="caption_' + photoCount + '" maxlength="200" placeholder="What is this photo of?"></label>';
-      document.getElementById('photo-list').appendChild(div);
-      photoCount += 1;
-    });
-  </script>
 </body>
 </html>
